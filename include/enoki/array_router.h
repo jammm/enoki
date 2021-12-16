@@ -35,8 +35,7 @@ NAMESPACE_BEGIN(enoki)
 
 /// Define an unary operation with a fallback expression for scalar arguments
 #define ENOKI_ROUTE_UNARY_SCALAR(name, func, expr)                             \
-    template <bool Approx = false, typename T>                                 \
-    ENOKI_INLINE auto name(const T &a) {                                       \
+    template <typename T> ENOKI_INLINE auto name(const T &a) {                 \
         if constexpr (!is_array_v<T>)                                          \
             return expr; /* Scalar fallback implementation */                  \
         else                                                                   \
@@ -222,7 +221,7 @@ ENOKI_ROUTE_TERNARY_SCALAR(fmaddsub, fmaddsub, fmsub(a1, a2, a3))
 ENOKI_ROUTE_TERNARY_SCALAR(fmsubadd, fmsubadd, fmadd(a1, a2, a3))
 
 ENOKI_ROUTE_UNARY_SCALAR(rcp, rcp, 1 / a)
-ENOKI_ROUTE_UNARY_SCALAR(rsqrt, rsqrt, detail::rsqrt_scalar<Approx>(a))
+ENOKI_ROUTE_UNARY_SCALAR(rsqrt, rsqrt, detail::rsqrt_scalar(a))
 
 ENOKI_ROUTE_UNARY_SCALAR(popcnt, popcnt, detail::popcnt_scalar(a))
 ENOKI_ROUTE_UNARY_SCALAR(lzcnt, lzcnt, detail::lzcnt_scalar(a))
@@ -231,18 +230,23 @@ ENOKI_ROUTE_UNARY_SCALAR(tzcnt, tzcnt, detail::tzcnt_scalar(a))
 ENOKI_ROUTE_UNARY_SCALAR(all,   all,   (bool) a)
 ENOKI_ROUTE_UNARY_SCALAR(any,   any,   (bool) a)
 ENOKI_ROUTE_UNARY_SCALAR(count, count, (size_t) ((bool) a ? 1 : 0))
-ENOKI_ROUTE_UNARY_SCALAR(hmin,  hmin,  a)
-ENOKI_ROUTE_UNARY_SCALAR(hmax,  hmax,  a)
+ENOKI_ROUTE_UNARY_SCALAR(reverse, reverse, a)
+ENOKI_ROUTE_UNARY_SCALAR(psum,  psum,  a)
 ENOKI_ROUTE_UNARY_SCALAR(hsum,  hsum,  a)
 ENOKI_ROUTE_UNARY_SCALAR(hprod, hprod, a)
+ENOKI_ROUTE_UNARY_SCALAR(hmin,  hmin,  a)
+ENOKI_ROUTE_UNARY_SCALAR(hmax,  hmax,  a)
+ENOKI_ROUTE_UNARY_SCALAR(hmean, hmean,  a)
 
 ENOKI_ROUTE_UNARY_SCALAR(all_inner,   all_inner,   (bool) a)
 ENOKI_ROUTE_UNARY_SCALAR(any_inner,   any_inner,   (bool) a)
 ENOKI_ROUTE_UNARY_SCALAR(count_inner, count_inner, (size_t) ((bool) a ? 1 : 0))
-ENOKI_ROUTE_UNARY_SCALAR(hmin_inner,  hmin_inner,  a)
-ENOKI_ROUTE_UNARY_SCALAR(hmax_inner,  hmax_inner,  a)
+ENOKI_ROUTE_UNARY_SCALAR(psum_inner,  psum_inner,  a)
 ENOKI_ROUTE_UNARY_SCALAR(hsum_inner,  hsum_inner,  a)
 ENOKI_ROUTE_UNARY_SCALAR(hprod_inner, hprod_inner, a)
+ENOKI_ROUTE_UNARY_SCALAR(hmin_inner,  hmin_inner,  a)
+ENOKI_ROUTE_UNARY_SCALAR(hmax_inner,  hmax_inner,  a)
+ENOKI_ROUTE_UNARY_SCALAR(hmean_inner, hmean_inner,  a)
 
 ENOKI_ROUTE_UNARY_SCALAR(sqrt,  sqrt,  std::sqrt(a))
 ENOKI_ROUTE_UNARY_SCALAR(floor, floor, std::floor(a))
@@ -270,9 +274,9 @@ ENOKI_INLINE auto operator/(const T1 &a1, const T2 &a2) {
 
     if constexpr (std::is_same_v<T1, E> && std::is_same_v<T2, E>)
         return a1.derived().div_(a2.derived());
-    else if constexpr (array_depth_v<T1> > array_depth_v<T2> && E::Approx)
+    else if constexpr (array_depth_v<T1> > array_depth_v<T2>)
         return static_cast<const E &>(a1) * // reciprocal approximation
-               rcp<E::Approx>((const T &) a2);
+               rcp((const T &) a2);
     else
         return operator/(static_cast<const E &>(a1),
                          static_cast<const E &>(a2));
@@ -618,11 +622,11 @@ ENOKI_INLINE auto isfinite(const T &a) {
 }
 
 /// Extract the low elements from an array of even size
-template <typename Array, enable_if_static_array_t<Array> = 0>
+template <typename Array, enable_if_t<(Array::Size > 1 && Array::Size != -1)> = 0>
 auto low(const Array &a) { return a.derived().low_(); }
 
 /// Extract the high elements from an array of even size
-template <typename Array, enable_if_static_array_t<Array> = 0>
+template <typename Array, enable_if_t<(Array::Size > 1 && Array::Size != -1)> = 0>
 auto high(const Array &a) { return a.derived().high_(); }
 
 template <typename T, typename Arg>
@@ -659,10 +663,11 @@ template <typename T> ENOKI_INLINE auto squared_norm(const T &v) {
 }
 
 template <typename T> ENOKI_INLINE auto normalize(const T &v) {
-    return v * rsqrt<array_approx_v<T>>(squared_norm(v));
+    return v * rsqrt(squared_norm(v));
 }
 
-template <typename T> ENOKI_INLINE auto partition(const T &v) {
+template <typename T, enable_if_t<is_dynamic_array_v<T>> = 0>
+ENOKI_INLINE auto partition(const T &v) {
     return v.partition_();
 }
 
@@ -679,11 +684,6 @@ ENOKI_INLINE auto cross(const T1 &v1, const T2 &v2) {
     return fmsub(shuffle<1, 2, 0>(v1),  shuffle<2, 0, 1>(v2),
                  shuffle<2, 0, 1>(v1) * shuffle<1, 2, 0>(v2));
 #endif
-}
-
-template <typename Array, enable_if_array_t<Array> = 0>
-ENOKI_INLINE auto mean(const Array &a) {
-    return hsum(a) * (1.f / a.size());
 }
 
 template <typename T> decltype(auto) detach(T &value) {
@@ -918,7 +918,7 @@ namespace detail {
 }
 
 template <size_t Size, typename T,
-          typename Return = Array<value_t<T>, Size, T::Approx, T::Mode>>
+          typename Return = Array<value_t<T>, Size>>
 ENOKI_INLINE Return head(const T &a) {
     if constexpr (T::ActualSize == Return::ActualSize) {
         return a;
@@ -931,7 +931,7 @@ ENOKI_INLINE Return head(const T &a) {
 }
 
 template <size_t Size, typename T,
-          typename Return = Array<value_t<T>, Size, T::Approx, T::Mode>>
+          typename Return = Array<value_t<T>, Size>>
 ENOKI_INLINE Return tail(const T &a) {
     if constexpr (T::Size == Return::Size) {
         return a;
@@ -963,6 +963,7 @@ ENOKI_INLINE auto extract(const Array &value, const Mask &mask) {
 extern ENOKI_IMPORT void cuda_trace_printf(const char *, uint32_t, uint32_t*);
 extern ENOKI_IMPORT void cuda_var_mark_dirty(uint32_t);
 extern ENOKI_IMPORT void cuda_eval(bool log_assembly = false);
+extern ENOKI_IMPORT void cuda_sync();
 extern ENOKI_IMPORT void cuda_set_scatter_gather_operand(uint32_t index, bool gather = false);
 extern ENOKI_IMPORT void cuda_set_log_level(uint32_t);
 extern ENOKI_IMPORT uint32_t cuda_log_level();
@@ -1224,29 +1225,46 @@ ENOKI_INLINE void prefetch(const Source &source, const Args &... args) {
 // -----------------------------------------------------------------------
 
 template <typename T> auto hsum_nested(const T &a) {
-    if constexpr (is_array_v<T>)
+    if constexpr (array_depth_v<T> == 1)
+        return hsum(a);
+    else if constexpr (is_array_v<T>)
         return hsum_nested(hsum(a));
     else
         return a;
 }
 
 template <typename T> auto hprod_nested(const T &a) {
-    if constexpr (is_array_v<T>)
+    if constexpr (array_depth_v<T> == 1)
+        return hprod(a);
+    else if constexpr (is_array_v<T>)
         return hprod_nested(hprod(a));
     else
         return a;
 }
 
 template <typename T> auto hmin_nested(const T &a) {
-    if constexpr (is_array_v<T>)
+    if constexpr (array_depth_v<T> == 1)
+        return hmin(a);
+    else if constexpr (is_array_v<T>)
         return hmin_nested(hmin(a));
     else
         return a;
 }
 
 template <typename T> auto hmax_nested(const T &a) {
-    if constexpr (is_array_v<T>)
+    if constexpr (array_depth_v<T> == 1)
+        return hmax(a);
+    else if constexpr (is_array_v<T>)
         return hmax_nested(hmax(a));
+    else
+        return a;
+}
+
+template <typename T> auto hmean_nested(const T &a) {
+    if constexpr (array_depth_v<T> == 1)
+        return hmean(a);
+    else if constexpr (is_array_v<T>)
+        return hmean_nested(hmean(a));
     else
         return a;
 }
@@ -1276,16 +1294,30 @@ template <typename T> auto none_nested(const T &a) {
     return !any_nested(a);
 }
 
-template <typename T1, typename T2, typename Value = expr_t<T1, T2>>
-bool allclose(const T1 &a1, const T2 &a2,
-              double relerr_thresh = std::is_same_v<scalar_t<T1>, float> ? 1e-5 : 1e-10,
-              double abserr_thresh = std::is_same_v<scalar_t<T1>, float> ? 1e-5 : 1e-10) {
-    using Scalar = scalar_t<Value>;
-    Scalar abserr = hmax_nested(abs(detach(a1) - detach(a2)));
-    Scalar relerr = abserr / hmax_nested(abs(detach(a2)));
+/// Convert an array with 1 entry into a scalar or throw an error
+template <typename T> scalar_t<T> scalar_cast(const T &v) {
+    static_assert(array_depth_v<T> <= 1);
+    if constexpr (is_array_v<T>) {
+        if (v.size() != 1)
+            throw std::runtime_error("scalar_cast(): array should be of size 1!");
+        return v.coeff(0);
+    } else {
+        return v;
+    }
+}
 
-    return (double) abserr < abserr_thresh ||
-           (double) relerr < relerr_thresh;
+template <typename T1, typename T2>
+bool allclose(const T1 &a, const T2 &b, float rtol = 1e-5f, float atol = 1e-8f,
+              bool equal_nan = false) {
+    auto cond = abs(a - b) <= abs(b) * rtol + atol;
+
+    if constexpr (std::is_floating_point_v<scalar_t<T1>> &&
+                  std::is_floating_point_v<scalar_t<T2>>) {
+        if (equal_nan)
+            cond |= isnan(a) & isnan(b);
+    }
+
+    return all_nested(cond);
 }
 
 //! @}
@@ -1297,45 +1329,57 @@ bool allclose(const T1 &a1, const T2 &a2,
 // -----------------------------------------------------------------------
 
 template <bool Default, typename T> auto any_or(const T &value) {
-    if constexpr (is_cuda_array_v<T>)
+    if constexpr (is_cuda_array_v<T>) {
+        ENOKI_MARK_USED(value);
         return Default;
-    else
+    } else {
         return any(value);
+    }
 }
 
 template <bool Default, typename T> auto any_nested_or(const T &value) {
-    if constexpr (is_cuda_array_v<T>)
+    if constexpr (is_cuda_array_v<T>) {
+        ENOKI_MARK_USED(value);
         return Default;
-    else
+    } else {
         return any_nested(value);
+    }
 }
 
 template <bool Default, typename T> auto none_or(const T &value) {
-    if constexpr (is_cuda_array_v<T>)
+    if constexpr (is_cuda_array_v<T>) {
+        ENOKI_MARK_USED(value);
         return Default;
-    else
+    } else {
         return none(value);
+    }
 }
 
 template <bool Default, typename T> auto none_nested_or(const T &value) {
-    if constexpr (is_cuda_array_v<T>)
+    if constexpr (is_cuda_array_v<T>) {
+        ENOKI_MARK_USED(value);
         return Default;
-    else
+    } else {
         return none_nested(value);
+    }
 }
 
 template <bool Default, typename T> auto all_or(const T &value) {
-    if constexpr (is_cuda_array_v<T>)
+    if constexpr (is_cuda_array_v<T>) {
+        ENOKI_MARK_USED(value);
         return Default;
-    else
+    } else {
         return all(value);
+    }
 }
 
 template <bool Default, typename T> auto all_nested_or(const T &value) {
-    if constexpr (is_cuda_array_v<T>)
+    if constexpr (is_cuda_array_v<T>) {
+        ENOKI_MARK_USED(value);
         return Default;
-    else
+    } else {
         return all_nested(value);
+    }
 }
 
 //! @}

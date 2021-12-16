@@ -429,11 +429,6 @@ namespace detail {
     template <typename T>     struct expr<T> : detail::expr_1<deepest_array_t<T>,     T>     { };
 }
 
-/// Array-specific definition of array_approx (defined in 'fwd.h')
-template <typename T> struct array_approx<T, enable_if_array_t<T>> {
-    static constexpr bool value = std::decay_t<T>::Derived::Approx;
-};
-
 namespace detail {
     template <typename T, typename = int> struct array_broadcast_outer {
         static constexpr bool value = true;
@@ -552,6 +547,10 @@ template <typename T> struct enoki_type<T, enable_if_t<is_int64_v<T>>> {
         std::is_signed_v<T> ? EnokiType::Int64 : EnokiType::UInt64;
 };
 
+template <typename T> struct enoki_type<T, enable_if_t<std::is_enum_v<T>>> {
+    static constexpr EnokiType value = enoki_type<std::underlying_type_t<T>>::value;
+};
+
 template <> struct enoki_type<half> {
     static constexpr EnokiType value = EnokiType::Float16;
 };
@@ -573,6 +572,42 @@ template <typename T> struct enoki_type<T *> {
 };
 
 template <typename T> constexpr EnokiType enoki_type_v = enoki_type<T>::value;
+
+//! @}
+// -----------------------------------------------------------------------
+
+// -----------------------------------------------------------------------
+//! @{ \name Type trait to inspect the return/argument types of functions
+// -----------------------------------------------------------------------
+
+template <typename T, typename SFINAE = void> struct function_traits { };
+
+// Vanilla function
+template <typename R, typename... A> struct function_traits<R(*)(A...)> {
+    using Args = std::tuple<A...>;
+    using Return = R;
+};
+
+// Method
+template <typename C, typename R, typename... A> struct function_traits<R(C::*)(A...)> {
+    using Class = C;
+    using Args = std::tuple<A...>;
+    using Return = R;
+};
+
+// Method (const)
+template <typename C, typename R, typename... A> struct function_traits<R(C::*)(A...) const> {
+    using Class = C;
+    using Args = std::tuple<A...>;
+    using Return = R;
+};
+
+// Lambda function -- strip lambda closure and delegate back to ``function_traits``
+template <typename F>
+struct function_traits<
+    F, std::enable_if_t<std::is_member_function_pointer_v<decltype(
+           &std::remove_reference_t<F>::operator())>>>
+    : function_traits<decltype(&std::remove_reference_t<F>::operator())> { };
 
 //! @}
 // -----------------------------------------------------------------------

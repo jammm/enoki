@@ -20,7 +20,7 @@
 #  pragma GCC diagnostic ignored "-Wclass-memaccess"
 #endif
 
-#define ENOKI_DYNAMIC 1
+#define ENOKI_DYNAMIC_H 1
 
 NAMESPACE_BEGIN(enoki)
 
@@ -32,11 +32,9 @@ struct DynamicArrayReference : ArrayBase<value_t<Packet_>, DynamicArrayReference
     using MaskType = DynamicArrayReference<mask_t<Packet>>;
 
     static constexpr size_t       PacketSize  = Packet::Size;
-    static constexpr bool         Approx      = Packet::Approx;
-    static constexpr RoundingMode Mode        = Packet::Mode;
     static constexpr bool         IsMask      = Packet::IsMask;
 
-    DynamicArrayReference(Packet *packets) : m_packets(packets) { }
+    DynamicArrayReference(Packet *packets = nullptr) : m_packets(packets) { }
 
     ENOKI_INLINE Packet &packet(size_t i) {
         return ((Packet *) ENOKI_ASSUME_ALIGNED(m_packets, alignof(Packet)))[i];
@@ -67,8 +65,6 @@ struct DynamicArrayImpl : ArrayBase<value_t<Packet_>, Derived_> {
     using PacketHolder                        = std::unique_ptr<Packet[]>;
 
     static constexpr size_t       PacketSize  = Packet::Size;
-    static constexpr bool         Approx      = Packet::Approx;
-    static constexpr RoundingMode Mode        = Packet::Mode;
     static constexpr bool         IsMask      = Packet::IsMask;
 
     using typename Base::Derived;
@@ -323,6 +319,20 @@ struct DynamicArrayImpl : ArrayBase<value_t<Packet_>, Derived_> {
             return result;                                                   \
         }
 
+    #define ENOKI_FWD_BINARY_OPERATION_SIZE(name, Return, op)                \
+        auto name##_(size_t a2) const {                                      \
+            Return result;                                                   \
+            result.resize_like(*this);                                       \
+            auto p1 = packet_ptr();                                          \
+            auto pr = result.packet_ptr();                                   \
+            for (size_t i = 0, n = result.packets(); i < n;                  \
+                 ++i, ++pr, p1++) {                                          \
+                auto a1 = *p1;                                               \
+                *pr = op;                                                    \
+            }                                                                \
+            return result;                                                   \
+        }
+
     #define ENOKI_FWD_TERNARY_OPERATION(name, Return, op)                    \
         template <typename T1, typename T2>                                  \
         auto name##_(const T1 &d1, const T2 &d2) const {                     \
@@ -368,11 +378,19 @@ struct DynamicArrayImpl : ArrayBase<value_t<Packet_>, Derived_> {
     ENOKI_FWD_BINARY_OPERATION(sr,  Derived, a1 >> a2)
     ENOKI_FWD_BINARY_OPERATION(rol, Derived, rol(a1, a2))
     ENOKI_FWD_BINARY_OPERATION(ror, Derived, ror(a1, a2))
+    ENOKI_FWD_BINARY_OPERATION(mulhi, Derived, mulhi(a1, a2))
+
+    ENOKI_FWD_BINARY_OPERATION_SIZE(sl, Derived, a1 << a2)
+    ENOKI_FWD_BINARY_OPERATION_SIZE(sr, Derived, a1 >> a2)
 
     ENOKI_FWD_UNARY_OPERATION_IMM(sl,  Derived, sl<Imm>(a))
     ENOKI_FWD_UNARY_OPERATION_IMM(sr,  Derived, sr<Imm>(a))
     ENOKI_FWD_UNARY_OPERATION_IMM(rol, Derived, rol<Imm>(a))
     ENOKI_FWD_UNARY_OPERATION_IMM(ror, Derived, ror<Imm>(a))
+
+    ENOKI_FWD_UNARY_OPERATION(lzcnt, Derived, lzcnt(a))
+    ENOKI_FWD_UNARY_OPERATION(tzcnt, Derived, tzcnt(a))
+    ENOKI_FWD_UNARY_OPERATION(popcnt, Derived, popcnt(a))
 
     ENOKI_FWD_BINARY_OPERATION(or,     Derived, a1 | a2)
     ENOKI_FWD_BINARY_OPERATION(and,    Derived, a1 & a2)
@@ -541,15 +559,18 @@ struct DynamicArrayImpl : ArrayBase<value_t<Packet_>, Derived_> {
         }
     }
 
-    template <typename Mask>
-    ENOKI_INLINE size_t compress_(float *&ptr, const Mask &mask) const {
+    template <typename Mask> Derived compress_(const Mask &mask) const {
         assert(mask.size() == size());
         size_t count = 0;
+        Derived result;
+        set_slices(result, size());
+        Value *ptr = result.data();
+
         for (size_t i = 0; i < packets(); ++i)
             count += compress(ptr, packet(i), mask.packet(i));
-        return count;
+        set_slices(result, count);
+        return result;
     }
-
 
     template <typename T> T ceil2int_() const {
         T result;
@@ -579,6 +600,34 @@ struct DynamicArrayImpl : ArrayBase<value_t<Packet_>, Derived_> {
     // -----------------------------------------------------------------------
     //! @{ \name Horizontal array operations
     // -----------------------------------------------------------------------
+
+    Derived reverse_() const {
+        using CoeffValue = std::conditional_t<IsMask, bool, Value>;
+
+        size_t n = size();
+
+        Derived result;
+        set_slices(result, n);
+
+        for (size_t i = 0; i < n; ++i)
+            result.coeff(i) = (CoeffValue) coeff(n - 1 - i);
+
+        return result;
+    }
+
+    Derived psum_() const {
+        Derived result;
+        set_slices(result, size());
+
+        if (!empty()) {
+            // Difficult to vectorize this..
+            result.coeff(0) = coeff(0);
+            for (size_t i = 1; i < size(); ++i)
+                result.coeff(i) = result.coeff(i - 1) + coeff(i);
+        }
+
+        return result;
+    }
 
     Value hsum_() const {
         if (size() == 0) {
@@ -740,13 +789,11 @@ struct DynamicArrayImpl : ArrayBase<value_t<Packet_>, Derived_> {
                               n_packets * sizeof(Packet));
         }
 
-        bool clean = false;
         if (m_size == 1) {
             /* Resizing a scalar array -- broadcast. */
             Packet p(scalar);
             for (size_t i = 0; i < n_packets; ++i)
                 m_packets[i] = p;
-            clean = true;
         } else if (m_size == 0) {
             /* Potentially initialize array contents with NaNs */
             #if !defined(NDEBUG)
@@ -756,8 +803,7 @@ struct DynamicArrayImpl : ArrayBase<value_t<Packet_>, Derived_> {
         }
 
         m_size = (Size) size;
-        if (clean)
-            clean_trailing_();
+        clean_trailing_();
     }
 
     // Clear the unused portion of a potential trailing partial packet
@@ -770,16 +816,35 @@ struct DynamicArrayImpl : ArrayBase<value_t<Packet_>, Derived_> {
         }
     }
 
-    static Derived map(void *ptr, size_t size) {
+    static Derived map(void *ptr, size_t size, bool dealloc = false) {
         assert((uintptr_t) ptr % alignof(Packet) == 0);
 
         Derived r;
         r.m_packets = PacketHolder((Packet *) ptr);
         r.m_size = (Size) size;
         r.m_packets_allocated =
-            (Size) ((size + PacketSize - 1) / PacketSize) | 0x80000000u;
+            (Size) ((size + PacketSize - 1) / PacketSize);
+
+        if (!dealloc)
+            r.m_packets_allocated |= 0x80000000u;
+
         return r;
     }
+
+    static Derived copy(const void *ptr, size_t size) {
+        Derived r;
+        r.m_size = (Size) size;
+        r.m_packets_allocated =
+            (Size) ((size + PacketSize - 1) / PacketSize);
+        r.m_packets = PacketHolder(new Packet[r.m_packets_allocated]);
+        memcpy(r.m_packets.get(), ptr, size * sizeof(Value));
+        return r;
+    }
+
+    Derived &managed() { return derived(); }
+    Derived &eval() { return derived(); }
+    Derived &managed() const { return derived(); }
+    Derived &eval() const { return derived(); }
 
     template <typename... Args> void resize_like(const Args&... args) {
         resize(check_size(args...));
@@ -980,7 +1045,7 @@ auto vectorize(Func &&f, Args &&... args)
 
     if constexpr (Check || Resize) {
         size_t status[] = { (
-            !is_dynamic_v<Args> ||
+            (!is_dynamic_v<Args> || array_size_v<Args> == 0) ||
             ((slice_count != 1 && slices(args) == 1 && Resize)
                  ? (set_slices((detail::mutable_ref_t<decltype(args)>) args, slice_count), true)
                  : (slices(args) == slice_count)))... };
@@ -1014,12 +1079,63 @@ auto vectorize_safe(Func &&f, Args &&... args)
     return vectorize<true>(f, args...);
 }
 
-#if defined(ENOKI_AUTODIFF) && !defined(ENOKI_BUILD)
-    extern ENOKI_IMPORT template struct Tape<DynamicArray<Packet<float>>>;
-    extern ENOKI_IMPORT template struct DiffArray<DynamicArray<Packet<float>>>;
+namespace detail {
+    template <typename T>
+    using reference_dynamic_t = std::conditional_t<
+        is_dynamic_v<T>,
+        std::add_lvalue_reference_t<T>,
+        T
+    >;
 
-    extern ENOKI_IMPORT template struct Tape<DynamicArray<Packet<double>>>;
-    extern ENOKI_IMPORT template struct DiffArray<DynamicArray<Packet<double>>>;
+    /// Strip the class from a method type
+    template <typename T> struct remove_class { };
+    template <typename C, typename R, typename... A> struct remove_class<R (C::*)(A...)> { typedef R type(A...); };
+    template <typename C, typename R, typename... A> struct remove_class<R (C::*)(A...) const> { typedef R type(A...); };
+}
+
+template <typename Func, typename Return, typename... Args>
+auto vectorize_wrapper_detail(Func &&f_, Return (*)(Args...)) {
+    return [f = std::forward<Func>(f_)](detail::reference_dynamic_t<enoki::make_dynamic_t<Args>>... args) {
+        return vectorize_safe(f, args...);
+    };
+}
+
+/// Vectorize a vanilla function pointer
+template <typename Return, typename... Args>
+auto vectorize_wrapper(Return (*f)(Args...)) {
+    return vectorize_wrapper_detail(f, f);
+}
+
+/// Vectorize a lambda function method (possibly with internal state)
+template <typename Func,
+          typename FuncType = typename detail::remove_class<
+              decltype(&std::remove_reference<Func>::type::operator())>::type>
+auto vectorize_wrapper(Func &&f) {
+    return vectorize_wrapper_detail(std::forward<Func>(f), (FuncType *) nullptr);
+}
+
+/// Vectorize a class method (non-const)
+template <typename Return, typename Class, typename... Arg>
+auto vectorize_wrapper(Return (Class::*f)(Arg...)) {
+    return vectorize_wrapper_detail(
+        [f](Class *c, Arg... args) -> Return { return (c->*f)(args...); },
+        (Return(*)(Class *, Arg...)) nullptr);
+}
+
+/// Vectorize a class method (const)
+template <typename Return, typename Class, typename... Arg>
+auto vectorize_wrapper(Return (Class::*f)(Arg...) const) {
+    return vectorize_wrapper_detail(
+        [f](const Class *c, Arg... args) -> Return { return (c->*f)(args...); },
+        (Return(*)(const Class *, Arg...)) nullptr);
+}
+
+#if defined(ENOKI_AUTODIFF_H) && !defined(ENOKI_BUILD)
+    ENOKI_AUTODIFF_EXTERN template struct ENOKI_AUTODIFF_EXPORT Tape<DynamicArray<Packet<float>>>;
+    ENOKI_AUTODIFF_EXTERN template struct ENOKI_AUTODIFF_EXPORT DiffArray<DynamicArray<Packet<float>>>;
+
+    ENOKI_AUTODIFF_EXTERN template struct ENOKI_AUTODIFF_EXPORT Tape<DynamicArray<Packet<double>>>;
+    ENOKI_AUTODIFF_EXTERN template struct ENOKI_AUTODIFF_EXPORT DiffArray<DynamicArray<Packet<double>>>;
 #endif
 
 NAMESPACE_END(enoki)

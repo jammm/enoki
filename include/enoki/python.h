@@ -56,6 +56,15 @@ struct type_caster<Value, std::enable_if_t<enoki::is_array_v<Value> &&
             return true;
         }
 
+        if constexpr (std::is_pointer_v<Scalar> || std::is_enum_v<Scalar>) {
+            /// Convert special array types (pointer, enum) to integer arrays
+            using UInt = enoki::uint_array_t<Value, false>;
+            type_caster<UInt> caster;
+            bool result = caster.load(src, convert);
+            value = caster.operator UInt &();
+            return result;
+        }
+
         if (!isinstance<array_t<Scalar>>(src)) {
             if (!convert)
                 return false;
@@ -108,7 +117,14 @@ struct type_caster<Value, std::enable_if_t<enoki::is_array_v<Value> &&
         return cast(*src, policy, parent);
     }
 
-    static handle cast(const Value &src, return_value_policy /* policy */, handle /* parent */) {
+    static handle cast(const Value &src, return_value_policy policy, handle parent) {
+        /// Convert special array types (pointer, enum) to integer arrays
+        if constexpr (std::is_pointer_v<Scalar> || std::is_enum_v<Scalar>) {
+            using UInt = enoki::uint_array_t<Value, false>;
+            return type_caster<UInt>::cast(src, policy, parent);
+        }
+        (void) policy; (void) parent;
+
         if (enoki::ragged(src))
             throw type_error("Ragged arrays are not supported!");
 
@@ -184,14 +200,14 @@ private:
                 buf += value.size();
             } else {
                 if constexpr (!enoki::is_dynamic_array_v<T>) {
-                    enoki::Array<bool, T::Size> value2;
+                    enoki::Array<bool, T::Size> value2 = false;
                     for (size_t i = 0, size = value2.size(); i < size; ++i)
                         value2.coeff(i) = *buf++;
                     value = enoki::reinterpret_array<T>(value2);
                 } else {
                     const Scalar *end = buf + value.size();
                     for (size_t i = 0; i < enoki::packets(value); ++i) {
-                        enoki::Array<bool, T::Packet::Size> value2;
+                        enoki::Array<bool, T::Packet::Size> value2 = false;
                         for (size_t j = 0; j < T::Packet::Size && buf != end; ++j)
                             value2.coeff(j) = *buf++;
                         enoki::packet(value, i) = enoki::reinterpret_array<typename T::Packet>(value2);
@@ -211,53 +227,3 @@ private:
 
 NAMESPACE_END(detail)
 NAMESPACE_END(pybind11)
-
-NAMESPACE_BEGIN(enoki)
-
-namespace detail {
-    template <typename T, typename = void> struct reference_dynamic { using type = T; };
-    template <typename T> struct reference_dynamic<T, std::enable_if_t<is_dynamic_v<T>>> {
-        using type = std::add_lvalue_reference_t<T>;
-    };
-    template <typename T>
-    using reference_dynamic_t = typename reference_dynamic<T>::type;
-}
-
-template <typename Func, typename Return, typename... Args>
-auto vectorize_wrapper_detail(Func &&f_, Return (*)(Args...)) {
-    return [f = std::forward<Func>(f_)](detail::reference_dynamic_t<enoki::make_dynamic_t<Args>>... args) {
-        return vectorize_safe(f, args...);
-    };
-}
-
-/// Vctorize a vanilla function pointer
-template <typename Return, typename... Args>
-auto vectorize_wrapper(Return (*f)(Args...)) {
-    return vectorize_wrapper_detail(f, f);
-}
-
-/// Vectorize a lambda function method (possibly with internal state)
-template <typename Func,
-          typename FuncType = typename pybind11::detail::remove_class<
-              decltype(&std::remove_reference<Func>::type::operator())>::type>
-auto vectorize_wrapper(Func &&f) {
-    return vectorize_wrapper_detail(std::forward<Func>(f), (FuncType *) nullptr);
-}
-
-/// Vectorize a class method (non-const)
-template <typename Return, typename Class, typename... Arg>
-auto vectorize_wrapper(Return (Class::*f)(Arg...)) {
-    return vectorize_wrapper_detail(
-        [f](Class *c, Arg... args) -> Return { return (c->*f)(args...); },
-        (Return(*)(Class *, Arg...)) nullptr);
-}
-
-/// Vectorize a class method (const)
-template <typename Return, typename Class, typename... Arg>
-auto vectorize_wrapper(Return (Class::*f)(Arg...) const) {
-    return vectorize_wrapper_detail(
-        [f](const Class *c, Arg... args) -> Return { return (c->*f)(args...); },
-        (Return(*)(const Class *, Arg...)) nullptr);
-}
-
-NAMESPACE_END(enoki)

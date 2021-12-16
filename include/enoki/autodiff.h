@@ -16,7 +16,7 @@
 #include <enoki/array.h>
 #include <vector>
 
-#define ENOKI_AUTODIFF 1
+#define ENOKI_AUTODIFF_H 1
 
 NAMESPACE_BEGIN(enoki)
 
@@ -35,7 +35,6 @@ private:
     using Int64 = int64_array_t<Type>;
 
     Tape();
-    ~Tape();
 
     // -----------------------------------------------------------------------
     //! @{ \name Append unary/binary/ternary operations to the tape
@@ -48,6 +47,9 @@ private:
 
     Index append(const char *label, size_t size, Index i1, Index i2, Index i3,
                  const Type &w1, const Type &w2, const Type &w3);
+
+    Index append_psum(Index i);
+    Index append_reverse(Index i);
 
     Index append_gather(const Int64 &offset, const Mask &mask);
 
@@ -112,10 +114,13 @@ private:
 
     static Tape* get() ENOKI_PURE;
 
+public:
+    ~Tape();
+
 private:
 
-    static Tape s_tape;
-    Detail *d = nullptr;
+    static std::unique_ptr<Tape> s_tape;
+    Detail *d;
 };
 
 template <typename Type>
@@ -132,7 +137,6 @@ public:
 
     static constexpr size_t Size = is_scalar_v<Type> ? 1 : array_size_v<Type>;
     static constexpr size_t Depth = is_scalar_v<Type> ? 1 : array_depth_v<Type>;
-    static constexpr bool Approx = array_approx_v<Type>;
     static constexpr bool IsMask = is_mask_v<Type>;
     static constexpr bool IsCUDA = is_cuda_array_v<Type>;
     static constexpr bool IsDiff = true;
@@ -871,17 +875,19 @@ public:
             return DiffArray::create(0, popcnt(m_value));
     }
 
-    template <size_t Imm>
-    DiffArray sl_() const { return DiffArray::create(0, sl<Imm>(m_value)); }
+    template <size_t Imm> DiffArray sl_() const {
+        if constexpr (is_mask_v<Type> || !std::is_integral_v<Scalar>)
+            fail_unsupported("sl_");
+        else
+            return DiffArray::create(0, sl<Imm>(m_value));
+    }
 
-    template <size_t Imm>
-    DiffArray sr_() const { return DiffArray::create(0, sr<Imm>(m_value)); }
-
-    template <size_t Imm>
-    DiffArray rol_() const { return DiffArray::create(0, rol<Imm>(m_value)); }
-
-    template <size_t Imm>
-    DiffArray ror_() const { return DiffArray::create(0, ror<Imm>(m_value)); }
+    template <size_t Imm> DiffArray sr_() const {
+        if constexpr (is_mask_v<Type> || !std::is_integral_v<Scalar>)
+            fail_unsupported("sr_");
+        else
+            return DiffArray::create(0, sr<Imm>(m_value));
+    }
 
     DiffArray sl_(const DiffArray &a) const {
         if constexpr (is_mask_v<Type> || !std::is_integral_v<Scalar>)
@@ -895,6 +901,34 @@ public:
             fail_unsupported("sr_");
         else
             return DiffArray::create(0, m_value >> a.m_value);
+    }
+
+    DiffArray sl_(size_t size) const {
+        if constexpr (is_mask_v<Type> || !std::is_integral_v<Scalar>)
+            fail_unsupported("sl_");
+        else
+            return DiffArray::create(0, m_value << size);
+    }
+
+    DiffArray sr_(size_t size) const {
+        if constexpr (is_mask_v<Type> || !std::is_integral_v<Scalar>)
+            fail_unsupported("sr_");
+        else
+            return DiffArray::create(0, m_value >> size);
+    }
+
+    template <size_t Imm> DiffArray rol_() const {
+        if constexpr (is_mask_v<Type> || !std::is_integral_v<Scalar>)
+            fail_unsupported("rol_");
+        else
+            return DiffArray::create(0, rol<Imm>(m_value));
+    }
+
+    template <size_t Imm> DiffArray ror_() const {
+        if constexpr (is_mask_v<Type> || !std::is_integral_v<Scalar>)
+            fail_unsupported("ror_");
+        else
+            return DiffArray::create(0, ror<Imm>(m_value));
     }
 
     DiffArray rol_(const DiffArray &a) const {
@@ -989,6 +1023,30 @@ public:
             fail_unsupported("count_");
         else
             return count(m_value);
+    }
+
+    DiffArray reverse_() const {
+        if constexpr (is_mask_v<Type> || std::is_pointer_v<Scalar>) {
+            fail_unsupported("reverse_");
+        } else {
+            Index index_new = 0;
+            if constexpr (Enabled)
+                index_new = tape()->append_reverse(m_index);
+
+            return DiffArray::create(index_new, reverse(m_value));
+        }
+    }
+
+    DiffArray psum_() const {
+        if constexpr (is_mask_v<Type> || std::is_pointer_v<Scalar>) {
+            fail_unsupported("psum_");
+        } else {
+            Index index_new = 0;
+            if constexpr (Enabled)
+                index_new = tape()->append_psum(m_index);
+
+            return DiffArray::create(index_new, psum(m_value));
+        }
     }
 
     DiffArray hsum_() const {
@@ -1288,6 +1346,45 @@ public:
             return tape()->whos();
     }
 
+    static DiffArray map(void *ptr, size_t size, bool dealloc = false) {
+        if constexpr (!is_dynamic_array_v<Type>)
+            fail_unsupported("map");
+        else
+            return DiffArray::create(0, Type::map(ptr, size, dealloc));
+    }
+
+    static DiffArray copy(const void *ptr, size_t size) {
+        if constexpr (!is_dynamic_array_v<Type>)
+            fail_unsupported("copy");
+        else
+            return DiffArray::create(0, Type::copy(ptr, size));
+    }
+
+    DiffArray &managed() {
+        if constexpr (is_cuda_array_v<Type>)
+            m_value.managed();
+        return *this;
+    }
+
+    const DiffArray &managed() const {
+        if constexpr (is_cuda_array_v<Type>)
+            m_value.managed();
+        return *this;
+    }
+
+
+    DiffArray &eval() {
+        if constexpr (is_cuda_array_v<Type>)
+            m_value.eval();
+        return *this;
+    }
+
+    const DiffArray &eval() const {
+        if constexpr (is_cuda_array_v<Type>)
+            m_value.eval();
+        return *this;
+    }
+
     auto operator->() const {
         using BaseType = std::decay_t<std::remove_pointer_t<Scalar>>;
         return call_support<BaseType, DiffArray>(*this);
@@ -1433,27 +1530,39 @@ template <typename T> std::string graphviz(const T &value) {
     return detail::diff_type_t<T>::graphviz_(indices);
 }
 
+#if defined(ENOKI_AUTODIFF_BUILD)
+#  define ENOKI_AUTODIFF_EXTERN extern
+#  define ENOKI_AUTODIFF_EXPORT ENOKI_EXPORT
+#else
+#  define ENOKI_AUTODIFF_EXPORT ENOKI_IMPORT
+#  if defined(_MSC_VER)
+#    define ENOKI_AUTODIFF_EXTERN
+#else
+#    define ENOKI_AUTODIFF_EXTERN extern
+#  endif
+#endif
+
 #if !defined(ENOKI_BUILD)
-    extern ENOKI_IMPORT template struct Tape<float>;
-    extern ENOKI_IMPORT template struct DiffArray<float>;
+    ENOKI_AUTODIFF_EXTERN template struct ENOKI_AUTODIFF_EXPORT Tape<float>;
+    ENOKI_AUTODIFF_EXTERN template struct ENOKI_AUTODIFF_EXPORT DiffArray<float>;
 
-    extern ENOKI_IMPORT template struct Tape<double>;
-    extern ENOKI_IMPORT template struct DiffArray<double>;
+    ENOKI_AUTODIFF_EXTERN template struct ENOKI_AUTODIFF_EXPORT Tape<double>;
+    ENOKI_AUTODIFF_EXTERN template struct ENOKI_AUTODIFF_EXPORT DiffArray<double>;
 
-#  if defined(ENOKI_DYNAMIC)
-        extern ENOKI_IMPORT template struct Tape<DynamicArray<Packet<float>>>;
-        extern ENOKI_IMPORT template struct DiffArray<DynamicArray<Packet<float>>>;
+#  if defined(ENOKI_DYNAMIC_H)
+        ENOKI_AUTODIFF_EXTERN template struct ENOKI_AUTODIFF_EXPORT Tape<DynamicArray<Packet<float>>>;
+        ENOKI_AUTODIFF_EXTERN template struct ENOKI_AUTODIFF_EXPORT DiffArray<DynamicArray<Packet<float>>>;
 
-        extern ENOKI_IMPORT template struct Tape<DynamicArray<Packet<double>>>;
-        extern ENOKI_IMPORT template struct DiffArray<DynamicArray<Packet<double>>>;
+        ENOKI_AUTODIFF_EXTERN template struct ENOKI_AUTODIFF_EXPORT Tape<DynamicArray<Packet<double>>>;
+        ENOKI_AUTODIFF_EXTERN template struct ENOKI_AUTODIFF_EXPORT DiffArray<DynamicArray<Packet<double>>>;
 #  endif
 
-#  if defined(ENOKI_CUDA)
-        extern ENOKI_IMPORT template struct Tape<CUDAArray<float>>;
-        extern ENOKI_IMPORT template struct DiffArray<CUDAArray<float>>;
+#  if defined(ENOKI_CUDA_H)
+        ENOKI_AUTODIFF_EXTERN template struct ENOKI_AUTODIFF_EXPORT Tape<CUDAArray<float>>;
+        ENOKI_AUTODIFF_EXTERN template struct ENOKI_AUTODIFF_EXPORT DiffArray<CUDAArray<float>>;
 
-        extern ENOKI_IMPORT template struct Tape<CUDAArray<double>>;
-        extern ENOKI_IMPORT template struct DiffArray<CUDAArray<double>>;
+        ENOKI_AUTODIFF_EXTERN template struct ENOKI_AUTODIFF_EXPORT Tape<CUDAArray<double>>;
+        ENOKI_AUTODIFF_EXTERN template struct ENOKI_AUTODIFF_EXPORT DiffArray<CUDAArray<double>>;
 #  endif
 #endif
 

@@ -71,6 +71,9 @@ template <typename Value_, typename Derived_> struct ArrayBase {
     /// Always prefer broadcasting to the outer dimensions of a N-D array
     static constexpr bool BroadcastPreferOuter = true;
 
+    /// Does this array represent a fixed size vector?
+    static constexpr bool IsVector = false;
+
     /// Does this array represent a complex number?
     static constexpr bool IsComplex = false;
 
@@ -161,6 +164,11 @@ template <typename Value_, typename Derived_> struct ArrayBase {
     /// Dot product fallback implementation
     ENOKI_INLINE auto dot_(const Derived &a) const { return hsum(derived() * a); }
 
+    /// Horizontal mean fallback implementation
+    ENOKI_INLINE auto hmean_() const {
+        return hsum(derived()) * (1.f / derived().size());
+    }
+
     template <size_t Stride, typename Index, typename Mask>
     ENOKI_INLINE void scatter_add_(void *mem, const Index &index,
                                    const Mask &mask) const {
@@ -180,8 +188,8 @@ namespace detail {
     }
 
     template <typename Stream, typename Array, size_t N, typename... Indices>
-    Stream &print(Stream &os, const Array &a, bool abbrev,
-                  const std::array<size_t, N> &size, Indices... indices) {
+    void print(Stream &os, const Array &a, bool abbrev,
+               const std::array<size_t, N> &size, Indices... indices) {
         ENOKI_MARK_USED(size);
         ENOKI_MARK_USED(abbrev);
         if constexpr (sizeof...(Indices) == N) {
@@ -216,13 +224,16 @@ namespace detail {
             }
             os << "]";
         }
-        return os;
     }
 }
 
 template <typename Value, typename Derived>
 ENOKI_NOINLINE std::ostream &operator<<(std::ostream &os, const ArrayBase<Value, Derived> &a) {
-    return detail::print(os, a, true, shape(a));
+    if (ragged(a))
+        os << "[ragged array]";
+    else
+        detail::print(os, a, true, shape(a));
+    return os;
 }
 
 

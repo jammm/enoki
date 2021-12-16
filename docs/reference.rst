@@ -194,44 +194,15 @@ Global variable definitions
    vector registers. It is equal to 64 if AVX512 is present, 32 if AVX is
    present, and 16 for machines with SSE 4.2 or ARM NEON.
 
-Rounding modes
---------------
+.. cpp:var:: static constexpr size_t array_default_size
 
-.. cpp:enum:: RoundingMode
-
-    Enumeration defining the choice of rounding modes for floating point
-    operations. :cpp:enumerator:`RoundingMode::Default` must be used for integer
-    arrays.
-
-    .. cpp:enumerator:: Default
-
-        Don't interfere with the rounding mode that is currently configured in
-        the hardware's status register.
-
-    .. cpp:enumerator:: Nearest
-
-        Round to the nearest representable value (the tie-breaking method is
-        hardware dependent)
-
-    .. cpp:enumerator:: Down
-
-        Always round to negative infinity
-
-    .. cpp:enumerator:: Up
-
-        Always round to positive infinity
-
-    .. cpp:enumerator:: Zero
-
-        Always round to zero
+   Denotes the default size of Enoki arrays. Equal to ``max_packet_size / 4``.
 
 Static arrays
 -------------
 
-.. cpp:class:: template <typename Value, size_t Size = max_packet_size / sizeof(Value), \
-                         bool Approx = detail::array_approx_v<Value>, \
-                         RoundingMode Mode = RoundingMode::Default> \
-               Array : StaticArrayImpl<Value, Size, Approx, Mode, Array<Value, Size, Approx, Mode>>
+.. cpp:class:: template <typename Value, size_t Size = array_default_size>
+               Array : StaticArrayImpl<Value, Size, Array<Value, Size>>
 
     The default Enoki array class -- a generic container that stores a
     fixed-size array of an arbitrary data type similar to the standard template
@@ -245,35 +216,18 @@ Static arrays
 
     * ``size_t Size``: the number of packed array entries.
 
-    * ``bool Approx``: specifies whether the vectorized approximate math
-      library should be used. In this case, transcendental operations like
-      ``sin``, ``atanh``, etc. will run using a fast vectorized implementation
-      that is slightly more approximate than the (scalar) implementation
-      provided by the C math library.
-
-      The default is to enable the approximate math library for single
-      precision floats. It is not supported for other types, and a
-      compile-time assertion will be raised in this case.
-
-    * ``RoundingMode Mode``: specifies the rounding mode used for elementary
-      arithmetic operations. Must be set to :any:`RoundingMode::Default` for
-      integer types or a compile-time assertion will be raised.
-
     This class is just a small wrapper that instantiates
     :cpp:class:`enoki::StaticArrayImpl` using the Curiously Recurring Template
     Pattern (CRTP). The latter provides the actual machinery that is needed to
     evaluate array expressions. See :ref:`custom-arrays` for details.
 
-.. cpp:class:: template <typename Value, size_t Size = max_packet_size / sizeof(Value), \
-                         bool Approx = detail::array_approx_v<Value>, \
-                         RoundingMode Mode = RoundingMode::Default> \
-               Packet : StaticArrayImpl<Value, Size, Approx, Mode, Array<Value, Size, Approx, Mode>>
+.. cpp:class:: template <typename Value, size_t Size = array_default_size>
+               Packet : StaticArrayImpl<Value, Size, Array<Value, Size>>
 
     The ``Packet`` type is identical to :cpp:class:`enoki::Array` except for
     its :ref:`broadcasting behavior <broadcasting>`.
 
-.. cpp:class:: template <typename Value, size_t Size, bool Approx, \
-                         RoundingMode Mode, typename Derived> StaticArrayImpl
+.. cpp:class:: template <typename Value, size_t Size, typename Derived> StaticArrayImpl
 
     This base class provides the core implementation of an Enoki array. It
     cannot be instantiated directly and is used via the Curiously Recurring
@@ -295,8 +249,8 @@ Static arrays
         Initialize the individual array entries with ``args`` (where
         ``sizeof...(args) == Size``).
 
-    .. cpp:function:: template<typename Value2, bool Approx2, RoundingMode Mode2, typename Derived2> \
-                      StaticArrayImpl(const StaticArrayImpl<Value2, Size, Approx2, Mode2, Derived2> &other)
+    .. cpp:function:: template<typename Value2, typename Derived2> \
+                      StaticArrayImpl(const StaticArrayImpl<Value2, Size, Derived2> &other)
 
         Initialize the array with the contents of another given array that
         potentially has a different underlying type. Enoki will perform a
@@ -643,6 +597,41 @@ Miscellaneous initialization
              [1, 3]]
         */
 
+.. cpp:function:: template <typename Predicate, typename Index> Index binary_search(scalar_t<Index> start, scalar_t<Index> end, Predicate pred)
+
+    Perform binary search over a range given a predicate ``pred``, which
+    monotonically decreases over this range (i.e. max one ``true`` -> ``false``
+    transition).
+
+    Given a (scalar) ``start`` and ``end`` index of a range, this function
+    evaluates a predicate ``floor(log2(end-start) + 1)`` times with index
+    values on the interval [start, end] (inclusive) to find the first index
+    that no longer satisfies it. Note that the template parameter ``Index`` is
+    automatically inferred from the supplied predicate. Specifically, the
+    predicate takes an index or an index vector of type ``Index`` as input
+    argument. In the vectorized case, each vector lane can thus evaluate a
+    different predicate. When ``pred`` is ``false`` for all entries, the
+    function returns ``start``, and when it is ``true`` for all cases, it
+    returns ``end``.
+
+    The following code example shows a typical use case: ``array`` contains a
+    sorted list of floating point numbers, and the goal is to map floating
+    point entries of ``x`` to the first index ``j`` such that ``array[j] >= x``
+    (and all of this of course in parallel for each vector element).
+
+    .. code-block:: cpp
+
+        std::vector<float> array = ...;
+        Float32P x = ...;
+
+        UInt32P j = binary_search(
+           0,
+           array.size() - 1,
+           [&](UInt32P index) {
+               return gather(array.data(), index) < x;
+           }
+        );
+
 
 Elementary Arithmetic Operators
 -------------------------------
@@ -813,7 +802,7 @@ Elementary Arithmetic Functions
 
 .. cpp:function:: template <typename Array> Array sign(Array x)
 
-    Computes the signum function :math:`\begin{cases}1,&\mathrm{if}\ x\ge 0\\0,&\mathrm{otherwise}\end{cases}`
+    Computes the signum function :math:`\begin{cases}1,&\mathrm{if}\ x\ge 0\\-1,&\mathrm{otherwise}\end{cases}`
 
     Analogous to ``std::copysign(1.f, x)``.
 
@@ -994,6 +983,32 @@ Horizontal operations
             bool b1 = (f1 != f2);
             bool b2 = any(neq(f1, f2));
 
+.. cpp:function:: template <typename Array> Array reverse(Array value)
+
+    Returns the input array with all components reversed, i.e.
+
+    .. code-block:: cpp
+
+
+        value[Array::Size-1], .., value[0]
+
+    For multidimensional arrays, the *outermost* dimension of ``Array`` are
+    reversed. Note that this operation is currently not efficiently vectorized
+    on 1D CPU arrays (though GPU and/or multi-dimensional arrays are fine).
+
+.. cpp:function:: template <typename Array> Array psum(Array value)
+
+    Computes the inclusive prefix sum of the components of ``value``, i.e.
+
+    .. code-block:: cpp
+
+        value[0], value[0] + value[1], .., value[0] + .. + value[Array::Size-1];
+
+    For multidimensional arrays, the horizontal reduction is performed over the
+    *outermost* dimension of ``Array``. Note that this operation is currently
+    not efficiently vectorized on 1D CPU arrays (though GPU and/or
+    multi-dimensional arrays are fine).
+
 .. cpp:function:: template <typename Array> value_t<Array> hsum(Array value)
 
     Efficiently computes the horizontal sum of the components of ``value``, i.e.
@@ -1002,7 +1017,7 @@ Horizontal operations
 
         value[0] + .. + value[Array::Size-1];
 
-    For 1D arrays, ``hsum()`` returns a scalar result. For multdimensional
+    For 1D arrays, ``hsum()`` returns a scalar result. For multidimensional
     arrays, the horizontal reduction is performed over the *outermost* dimension
     of ``Array``, and the result is of type ``value_t<Array>``.
 
@@ -1025,7 +1040,7 @@ Horizontal operations
 
         value[0] * .. * value[Array::Size-1];
 
-    For 1D arrays, ``hprod()`` returns a scalar result. For multdimensional
+    For 1D arrays, ``hprod()`` returns a scalar result. For multidimensional
     arrays, the horizontal reduction is performed over the *outermost* dimension
     of ``Array``, and the result is of type ``value_t<Array>``.
 
@@ -1048,7 +1063,7 @@ Horizontal operations
 
         max(value[0], max(value[1], ...))
 
-    For 1D arrays, ``hmax()`` returns a scalar result. For multdimensional
+    For 1D arrays, ``hmax()`` returns a scalar result. For multidimensional
     arrays, the horizontal reduction is performed over the *outermost* dimension
     of ``Array``, and the result is of type ``value_t<Array>``.
 
@@ -1071,7 +1086,7 @@ Horizontal operations
 
         min(value[0], min(value[1], ...))
 
-    For 1D arrays, ``hmin()`` returns a scalar result. For multdimensional
+    For 1D arrays, ``hmin()`` returns a scalar result. For multidimensional
     arrays, the horizontal reduction is performed over the *outermost* dimension
     of ``Array``, and the result is of type ``value_t<Array>``.
 
@@ -1095,7 +1110,7 @@ Horizontal operations
 
         value[0] & ... & value[Size-1]
 
-    For 1D arrays, ``all()`` returns a boolean result. For multdimensional
+    For 1D arrays, ``all()`` returns a boolean result. For multidimensional
     arrays, the horizontal reduction is performed over the *outermost* dimension
     of ``Mask``, and the result is of type ``mask_t<value_t<Mask>>``.
 
@@ -1126,7 +1141,7 @@ Horizontal operations
 
         value[0] | ... | value[Size-1]
 
-    For 1D arrays, ``any()`` returns a boolean result. For multdimensional
+    For 1D arrays, ``any()`` returns a boolean result. For multidimensional
     arrays, the horizontal reduction is performed over the *outermost* dimension
     of ``Mask``, and the result is of type ``mask_t<value_t<Mask>>``.
 
@@ -1157,7 +1172,7 @@ Horizontal operations
 
         ~(value[0] | ... | value[Size-1])
 
-    For 1D arrays, ``none()`` returns a boolean result. For multdimensional
+    For 1D arrays, ``none()`` returns a boolean result. For multidimensional
     arrays, the horizontal reduction is performed over the *outermost* dimension
     of ``Mask``, and the result is of type ``mask_t<value_t<Mask>>``.
 
@@ -1188,9 +1203,10 @@ Horizontal operations
 
         (value[0] ? 1 : 0) + ... (value[Size - 1] ? 1 : 0)
 
-    For 1D arrays, ``count()`` returns a result of type ``size_t``. For multdimensional
-    arrays, the horizontal reduction is performed over the *outermost* dimension
-    of ``Mask``, and the result is of type ``size_array_t<value_t<Mask>>``.
+    For 1D arrays, ``count()`` returns a result of type ``size_t``. For
+    multidimensional arrays, the horizontal reduction is performed over the
+    *outermost* dimension of ``Mask``, and the result is of type
+    ``size_array_t<value_t<Mask>>``.
 
 .. cpp:function:: template <typename Mask> auto count_inner(Mask value)
 
@@ -1697,6 +1713,18 @@ The following special functions require including the header
     .. math::
 
         I_0(x) = \frac{1}{\pi} \int_{0}^\pi e^{x\cos \theta}\mathrm{d}\theta.
+
+.. cpp:function:: template <typename Array> Array gamma(Array x)
+
+    Evaluates the Gamma function defined as
+
+    .. math::
+
+        \Gamma(x)=\int_0^\infty t^{x-1} e^{-t}\,\mathrm{d}t.
+
+.. cpp:function:: template <typename Array> Array lgamma(Array x)
+
+    Evaluates the natural logarithm of the Gamma function.
 
 .. cpp:function:: template <typename Array> Array dawson(Array x)
 

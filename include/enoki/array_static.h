@@ -21,20 +21,13 @@ namespace detail {
     }
 }
 
-template <typename Value_, size_t Size_, bool Approx_, RoundingMode Mode_, bool IsMask_, typename Derived_>
+template <typename Value_, size_t Size_, bool IsMask_, typename Derived_>
 struct StaticArrayBase : ArrayBase<Value_, Derived_> {
     using Base = ArrayBase<Value_, Derived_>;
     using typename Base::Derived;
     using typename Base::Value;
     using typename Base::Scalar;
     using Base::derived;
-
-    static_assert(is_std_float<Scalar>::value || !Approx_ || IsMask_ || std::is_same_v<Scalar, bool>,
-                  "Approximate math library functions are only supported for "
-                  "single and double precision arrays!");
-
-    static_assert(!std::is_integral_v<Scalar> || Mode_ == RoundingMode::Default || IsMask_,
-                  "Integer arrays require Mode == RoundingMode::Default");
 
     // -----------------------------------------------------------------------
     //! @{ \name Basic declarations
@@ -52,22 +45,19 @@ struct StaticArrayBase : ArrayBase<Value_, Derived_> {
     /// Size and ActualSize can be different, e.g. when representing 3D vectors using 4-wide registers
     static constexpr size_t ActualSize = Size;
 
-    /// Are arithmetic operations approximate?
-    static constexpr bool Approx = Approx_;
-
-    /// Rounding mode of arithmetic operations
-    static constexpr RoundingMode Mode = Mode_;
-
     /// Is this a mask type?
     static constexpr bool IsMask = Base::IsMask || IsMask_;
 
+    /// Does this array represent a fixed size vector?
+    static constexpr bool IsVector = true;
+
     /// Type of the low array part returned by low()
-    using Array1 = std::conditional_t<!IsMask_, Array<Value_, Size1, Approx_, Mode_>,
-                                                Mask <Value_, Size1, Approx_, Mode_>>;
+    using Array1 = std::conditional_t<!IsMask_, Array<Value_, Size1>,
+                                                Mask <Value_, Size1>>;
 
     /// Type of the high array part returned by high()
-    using Array2 = std::conditional_t<!IsMask_, Array<Value_, Size2, Approx_, Mode_>,
-                                                Mask <Value_, Size2, Approx_, Mode_>>;
+    using Array2 = std::conditional_t<!IsMask_, Array<Value_, Size2>,
+                                                Mask <Value_, Size2>>;
 
     //! @}
     // -----------------------------------------------------------------------
@@ -90,11 +80,11 @@ struct StaticArrayBase : ArrayBase<Value_, Derived_> {
     StaticArrayBase &operator=(StaticArrayBase &&) = default;
 
     /// Type cast fallback
-    template <typename Value2, size_t Size2, bool Approx2, RoundingMode Mode2,
+    template <typename Value2, size_t Size2,
               typename Derived2, typename T = Derived,
               enable_if_t<Derived2::Size == T::Size> = 0>
     ENOKI_INLINE StaticArrayBase(
-        const StaticArrayBase<Value2, Size2, Approx2, Mode2, IsMask_, Derived2> &a) {
+        const StaticArrayBase<Value2, Size2, IsMask_, Derived2> &a) {
         ENOKI_CHKSCALAR("Copy constructor (type cast)");
         for (size_t i = 0; i < Derived::Size; ++i)
             (Value &) derived().coeff(i) = (const Value &) a.derived().coeff(i);
@@ -355,7 +345,7 @@ struct StaticArrayBase : ArrayBase<Value_, Derived_> {
         Derived result;
         for (size_t i = 0; i < Derived::Size; ++i)
             (Value &) result.coeff(i) =
-                abs((const Value &) derived().coeff(i));
+                enoki::abs((const Value &) derived().coeff(i));
         return result;
     }
 
@@ -365,7 +355,7 @@ struct StaticArrayBase : ArrayBase<Value_, Derived_> {
         Derived result;
         for (size_t i = 0; i < Derived::Size; ++i)
             (Value &) result.coeff(i) =
-                sqrt((const Value &) derived().coeff(i));
+                enoki::sqrt((const Value &) derived().coeff(i));
         return result;
     }
 
@@ -385,7 +375,7 @@ struct StaticArrayBase : ArrayBase<Value_, Derived_> {
         Derived result;
         for (size_t i = 0; i < Derived::Size; ++i)
             (Value &) result.coeff(i) =
-                ceil((const Value &) derived().coeff(i));
+                enoki::ceil((const Value &) derived().coeff(i));
         return result;
     }
 
@@ -395,7 +385,7 @@ struct StaticArrayBase : ArrayBase<Value_, Derived_> {
         Derived result;
         for (size_t i = 0; i < Derived::Size; ++i)
             (Value &) result.coeff(i) =
-                floor((const Value &) derived().coeff(i));
+                enoki::floor((const Value &) derived().coeff(i));
         return result;
     }
 
@@ -405,7 +395,7 @@ struct StaticArrayBase : ArrayBase<Value_, Derived_> {
         Derived result;
         for (size_t i = 0; i < Derived::Size; ++i)
             (Value &) result.coeff(i) =
-                round((const Value &) derived().coeff(i));
+                enoki::round((const Value &) derived().coeff(i));
         return result;
     }
 
@@ -415,7 +405,7 @@ struct StaticArrayBase : ArrayBase<Value_, Derived_> {
         Derived result;
         for (size_t i = 0; i < Derived::Size; ++i)
             (Value &) result.coeff(i) =
-                trunc((const Value &) derived().coeff(i));
+                enoki::trunc((const Value &) derived().coeff(i));
         return result;
     }
 
@@ -424,8 +414,8 @@ struct StaticArrayBase : ArrayBase<Value_, Derived_> {
         ENOKI_CHKSCALAR("max");
         Derived result;
         for (size_t i = 0; i < Derived::Size; ++i)
-            (Value &) result.coeff(i) = max((const Value &) derived().coeff(i),
-                                            (const Value &) d.coeff(i));
+            (Value &) result.coeff(i) = enoki::max((const Value &) derived().coeff(i),
+                                                   (const Value &) d.coeff(i));
         return result;
     }
 
@@ -434,8 +424,8 @@ struct StaticArrayBase : ArrayBase<Value_, Derived_> {
         ENOKI_CHKSCALAR("min");
         Derived result;
         for (size_t i = 0; i < Derived::Size; ++i)
-            (Value &) result.coeff(i) = min((const Value &) derived().coeff(i),
-                                            (const Value &) d.coeff(i));
+            (Value &) result.coeff(i) = enoki::min((const Value &) derived().coeff(i),
+                                                   (const Value &) d.coeff(i));
         return result;
     }
 
@@ -636,7 +626,7 @@ struct StaticArrayBase : ArrayBase<Value_, Derived_> {
                     ceil2int<value_t<T>>((const Value &) derived().coeff(i));
             return result;
         } else {
-            return T(ceil(derived()));
+            return T(enoki::ceil(derived()));
         }
     }
 
@@ -729,6 +719,40 @@ public:
     //! @{ \name Fallback implementations of horizontal operations
     // -----------------------------------------------------------------------
 
+    /// Reverse fallback
+    ENOKI_INLINE Derived reverse_() const {
+        ENOKI_CHKSCALAR("reverse");
+        Derived result;
+        for (size_t i = 0; i < Derived::Size; ++i)
+            result.coeff(i) = (const Value &) derived().coeff(Derived::Size - 1 - i);
+        return result;
+    }
+
+    /// Prefix sum fallback
+    ENOKI_INLINE Derived psum_() const {
+        ENOKI_CHKSCALAR("psum");
+        Derived result;
+        result.coeff(0) = (const Value &) derived().coeff(0);
+        for (size_t i = 1; i < Derived::Size; ++i)
+            result.coeff(i) = (const Value &) result.coeff(i - 1) +
+                              (const Value &) derived().coeff(i);
+        return result;
+    }
+
+    /// Prefix sum over innermost dimension
+    ENOKI_INLINE auto psum_inner_() const {
+        if constexpr (is_array_v<Value>) {
+            using Value = decltype(psum_inner(derived().coeff(0)));
+            using Result = typename Derived::template ReplaceValue<Value>;
+            Result result;
+            for (size_t i = 0; i < Derived::Size; ++i)
+                result.coeff(i) = psum_inner(derived().coeff(i));
+            return result;
+        } else {
+            return psum(derived());
+        }
+    }
+
     /// Horizontal sum fallback
     ENOKI_INLINE Value hsum_() const {
         ENOKI_CHKSCALAR("hsum");
@@ -818,6 +842,20 @@ public:
             return result;
         } else {
             return hmin(derived());
+        }
+    }
+
+    /// Horizontal mean over innermost dimension
+    ENOKI_INLINE auto hmean_inner_() const {
+        if constexpr (is_array_v<Value>) {
+            using Value = decltype(hmean_inner(derived().coeff(0)));
+            using Result = typename Derived::template ReplaceValue<Value>;
+            Result result;
+            for (size_t i = 0; i < Derived::Size; ++i)
+                result.coeff(i) = hmean_inner(derived().coeff(i));
+            return result;
+        } else {
+            return hmean(derived());
         }
     }
 
@@ -1053,13 +1091,14 @@ public:
                                    derived().coeff(i), mask.coeff(i));
     }
 
-    static ENOKI_INLINE Derived zero_() { return Derived(Value(0)); }
+    static ENOKI_INLINE Derived zero_() { return Derived(zero<Value>()); }
 
     template <typename T> static Derived full_(const T &value, size_t size) {
         ENOKI_MARK_USED(size);
-        if constexpr (array_depth_v<T> == array_depth_v<Derived> ||
-                      !is_static_array_v<Value> ||
-                      (array_depth_v<T> == 0 && !is_dynamic_v<Derived>)) {
+
+        if constexpr (array_depth_v<T> > array_depth_v<Value> ||
+                      (array_depth_v<T> == array_depth_v<Value> &&
+                       (is_dynamic_array_v<Value> || is_scalar_v<Value>))) {
             return Derived(value);
         } else {
             Derived result;
@@ -1078,8 +1117,14 @@ public:
 
     /// Construct an array that linearly interpolates from min..max
     static ENOKI_INLINE Derived linspace_(Scalar min, Scalar max) {
-        return linspace_(std::make_index_sequence<Derived::Size>(), min,
-            (max - min) / (Scalar) (Derived::Size - 1));
+        if constexpr (Derived::Size == 0) {
+            return Derived();
+        } else if constexpr (Derived::Size == 1) {
+            return Derived(min);
+        } else {
+            return linspace_(std::make_index_sequence<Derived::Size>(), min,
+                (max - min) / (Scalar) (Derived::Size - 1));
+        }
     }
 
     /// Return an unitialized array
@@ -1146,6 +1191,38 @@ public:
 
     ENOKI_INLINE decltype(auto) data() { return &derived().coeff(0); }
     ENOKI_INLINE decltype(auto) data() const { return &derived().coeff(0); }
+
+    ENOKI_INLINE Derived& managed() {
+        if constexpr (is_cuda_array_v<Value_>) {
+            for (size_t i = 0; i < Derived::Size; ++i)
+                derived().coeff(i).managed();
+        }
+        return derived();
+    }
+
+    ENOKI_INLINE const Derived& managed() const {
+        if constexpr (is_cuda_array_v<Value_>) {
+            for (size_t i = 0; i < Derived::Size; ++i)
+                derived().coeff(i).managed();
+        }
+        return derived();
+    }
+
+    ENOKI_INLINE Derived& eval() {
+        if constexpr (is_cuda_array_v<Value_>) {
+            for (size_t i = 0; i < Derived::Size; ++i)
+                derived().coeff(i).eval();
+        }
+        return derived();
+    }
+
+    ENOKI_INLINE const Derived& eval() const {
+        if constexpr (is_cuda_array_v<Value_>) {
+            for (size_t i = 0; i < Derived::Size; ++i)
+                derived().coeff(i).eval();
+        }
+        return derived();
+    }
 
     //! @}
     // -----------------------------------------------------------------------

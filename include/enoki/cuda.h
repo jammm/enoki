@@ -13,7 +13,7 @@
 
 #pragma once
 
-#define ENOKI_CUDA 1
+#define ENOKI_CUDA_H 1
 
 #include <enoki/array.h>
 
@@ -88,6 +88,9 @@ extern ENOKI_IMPORT uint32_t cuda_trace_append(EnokiType type,
 extern ENOKI_IMPORT void cuda_trace_printf(const char *fmt, uint32_t narg,
                                            uint32_t *arg);
 
+/// Computes the prefix sum of a given memory region
+template <typename T> extern ENOKI_IMPORT T* cuda_psum(size_t, const T *);
+
 /// Computes the horizontal sum of a given memory region
 template <typename T> extern ENOKI_IMPORT T* cuda_hsum(size_t, const T *);
 
@@ -114,10 +117,10 @@ extern ENOKI_IMPORT bool cuda_all(size_t, const bool *);
 extern ENOKI_IMPORT bool cuda_any(size_t, const bool *);
 
 /// Sort 'ptrs' and return unique instances and their count, as well as a permutation
-extern ENOKI_IMPORT size_t cuda_partition(size_t size, const void **ptrs,
-                                          void ***unique_out,
-                                          uint32_t **counts_out,
-                                          uint32_t ***perm_out);
+extern ENOKI_IMPORT void cuda_partition(size_t size, const void **ptrs,
+                                        void ***unique_out,
+                                        uint32_t **counts_out,
+                                        uint32_t ***perm_out);
 
 /// Copy some host memory region to the device and wrap it in a variable
 extern ENOKI_IMPORT uint32_t cuda_var_copy_to_device(EnokiType type,
@@ -153,14 +156,17 @@ extern ENOKI_IMPORT void* cuda_managed_malloc(size_t size);
 /// Allocate host-pinned memory (wrapper around cudaMallocHost)
 extern ENOKI_IMPORT void* cuda_host_malloc(size_t);
 
-/// Allocate zero-initialized device-local memory (wrapper around cudaMalloc & cudaMemsetAsync)
-extern ENOKI_IMPORT void* cuda_malloc_zero(size_t);
+/// Allocate unified memory (wrapper around analogues of cudaMemsetAsync)
+extern ENOKI_IMPORT void cuda_fill(uint8_t *ptr, uint8_t value, size_t size);
+extern ENOKI_IMPORT void cuda_fill(uint16_t *ptr, uint16_t value, size_t size);
+extern ENOKI_IMPORT void cuda_fill(uint32_t *ptr, uint32_t value, size_t size);
+extern ENOKI_IMPORT void cuda_fill(uint64_t *ptr, uint64_t value, size_t size);
 
-/// Allocate unified memory (wrapper around cudaMalloc & analogues of cudaMemsetAsync)
-extern ENOKI_IMPORT void* cuda_malloc_fill(size_t, uint8_t values);
-extern ENOKI_IMPORT void* cuda_malloc_fill(size_t, uint16_t values);
-extern ENOKI_IMPORT void* cuda_malloc_fill(size_t, uint32_t values);
-extern ENOKI_IMPORT void* cuda_malloc_fill(size_t, uint64_t values);
+/// Reverse an array
+extern ENOKI_IMPORT void cuda_reverse(uint8_t *out, const uint8_t *in, size_t size);
+extern ENOKI_IMPORT void cuda_reverse(uint16_t *out, const uint16_t *in, size_t size);
+extern ENOKI_IMPORT void cuda_reverse(uint32_t *out, const uint32_t *in, size_t size);
+extern ENOKI_IMPORT void cuda_reverse(uint64_t *out, const uint64_t *in, size_t size);
 
 /// Release device-local or unified memory
 extern ENOKI_IMPORT void cuda_free(void *);
@@ -176,6 +182,9 @@ extern ENOKI_IMPORT void cuda_sync();
 
 /// Print detailed information about currently allocated arrays
 extern ENOKI_IMPORT char *cuda_whos();
+
+/// Convert a variable into managed memory (if applicable)
+extern ENOKI_IMPORT void cuda_make_managed(uint32_t);
 
 /// Register a callback that will be invoked before cuda_eval()
 extern void cuda_register_callback(void (*callback)(void *), void *payload);
@@ -200,7 +209,6 @@ struct CUDAArray : ArrayBase<value_t<Value>, CUDAArray<Value>> {
 
     static constexpr EnokiType Type = enoki_type_v<Value>;
     static constexpr bool IsCUDA = true;
-    static constexpr bool Approx = std::is_floating_point_v<Value>;
     template <typename T> using ReplaceValue = CUDAArray<T>;
     using MaskType = CUDAArray<bool>;
     using ArrayType = CUDAArray;
@@ -209,6 +217,8 @@ struct CUDAArray : ArrayBase<value_t<Value>, CUDAArray<Value>> {
 
     ~CUDAArray() {
         cuda_dec_ref_ext(m_index);
+        if constexpr (std::is_pointer_v<Value> || std::is_same_v<Value, uintptr_t>)
+            delete m_cached_partition;
     }
 
     CUDAArray(const CUDAArray &a) : m_index(a.m_index) {
@@ -217,6 +227,10 @@ struct CUDAArray : ArrayBase<value_t<Value>, CUDAArray<Value>> {
 
     CUDAArray(CUDAArray &&a) : m_index(a.m_index) {
         a.m_index = 0;
+        if constexpr (std::is_pointer_v<Value> || std::is_same_v<Value, uintptr_t>) {
+            m_cached_partition = a.m_cached_partition;
+            a.m_cached_partition = nullptr;
+        }
     }
 
     template <typename T> CUDAArray(const CUDAArray<T> &v) {
@@ -312,11 +326,15 @@ struct CUDAArray : ArrayBase<value_t<Value>, CUDAArray<Value>> {
         cuda_inc_ref_ext(a.m_index);
         cuda_dec_ref_ext(m_index);
         m_index = a.m_index;
+        if constexpr (std::is_pointer_v<Value> || std::is_same_v<Value, uintptr_t>)
+            m_cached_partition = nullptr;
         return *this;
     }
 
     CUDAArray &operator=(CUDAArray &&a) {
         std::swap(m_index, a.m_index);
+        if constexpr (std::is_pointer_v<Value> || std::is_same_v<Value, uintptr_t>)
+            std::swap(m_cached_partition, a.m_cached_partition);
         return *this;
     }
 
@@ -488,16 +506,21 @@ struct CUDAArray : ArrayBase<value_t<Value>, CUDAArray<Value>> {
     }
 
     CUDAArray sr_(const CUDAArray &v) const {
+        const char *op = std::is_signed_v<Value> ? "shr.$t1 $r1, $r2, $r3"
+                                                 : "shr.$b1 $r1, $r2, $r3";
         if constexpr (sizeof(Value) == 4)
             return CUDAArray::from_index_(cuda_trace_append(Type,
-                "shr.$b1 $r1, $r2, $r3", index_(), v.index_()));
+                op, index_(), v.index_()));
         else
             return CUDAArray::from_index_(cuda_trace_append(Type,
-                "shr.$b1 $r1, $r2, $r3", index_(), CUDAArray<int32_t>(v).index_()));
+                op, index_(), CUDAArray<int32_t>(v).index_()));
     }
 
-    template <size_t Imm> CUDAArray sl_() const { return sl_(Value(Imm)); }
-    template <size_t Imm> CUDAArray sr_() const { return sr_(Value(Imm)); }
+    CUDAArray sl_(size_t value) const { return sl_(CUDAArray((Value) value)); }
+    CUDAArray sr_(size_t value) const { return sr_(CUDAArray((Value) value)); }
+
+    template <size_t Imm> CUDAArray sl_() const { return sl_(Imm); }
+    template <size_t Imm> CUDAArray sr_() const { return sr_(Imm); }
 
     CUDAArray not_() const {
         return CUDAArray::from_index_(cuda_trace_append(Type,
@@ -645,19 +668,26 @@ struct CUDAArray : ArrayBase<value_t<Value>, CUDAArray<Value>> {
     }
 
     static CUDAArray zero_(size_t size) {
-        if (size == 1)
+        if (size == 1) {
             return CUDAArray(Value(0));
-        else
-            return CUDAArray::from_index_(cuda_var_register(
-                Type, size, cuda_malloc_zero(size * sizeof(Value)), true));
+        } else {
+            void *ptr = cuda_malloc(size * sizeof(Value));
+            cuda_fill((uint8_t *) ptr, 0, size * sizeof(Value));
+            uint32_t index = cuda_var_register(Type, size, ptr, true);
+            return CUDAArray::from_index_(index);
+        }
     }
 
     static CUDAArray full_(const Value &value, size_t size) {
-        if (size == 1)
+        if (size == 1) {
             return CUDAArray(value);
-        else
-            return CUDAArray::from_index_(cuda_var_register(
-                Type, size, cuda_malloc_fill(size, memcpy_cast<uint_array_t<Value>>(value)), true));
+        } else {
+            using UInt = uint_array_t<Value>;
+            void *ptr = cuda_malloc(size * sizeof(Value));
+            cuda_fill((UInt *) ptr, memcpy_cast<UInt>(value), size);
+            uint32_t index = cuda_var_register(Type, size, ptr, true);
+            return CUDAArray::from_index_(index);
+        }
     }
 
     CUDAArray hsum_() const {
@@ -665,9 +695,33 @@ struct CUDAArray : ArrayBase<value_t<Value>, CUDAArray<Value>> {
         if (n == 1) {
             return *this;
         } else {
-            cuda_eval_var(m_index);
+            eval();
             Value *result = cuda_hsum(n, (const Value *) cuda_var_ptr(m_index));
             return CUDAArray::from_index_(cuda_var_register(Type, 1, result, true));
+        }
+    }
+
+    CUDAArray reverse_() const {
+        using UInt = uint_array_t<Value>;
+
+        size_t n = size();
+        if (n <= 1)
+            return *this;
+
+        eval();
+        UInt *result = (UInt *) cuda_malloc(n * sizeof(Value));
+        cuda_reverse(result, (const UInt *) cuda_var_ptr(m_index), n);
+        return CUDAArray::from_index_(cuda_var_register(Type, n, result, true));
+    }
+
+    CUDAArray psum_() const {
+        size_t n = size();
+        if (n <= 1) {
+            return *this;
+        } else {
+            eval();
+            Value *result = cuda_psum(n, (const Value *) cuda_var_ptr(m_index));
+            return CUDAArray::from_index_(cuda_var_register(Type, n, result, true));
         }
     }
 
@@ -676,7 +730,7 @@ struct CUDAArray : ArrayBase<value_t<Value>, CUDAArray<Value>> {
         if (n == 1) {
             return *this;
         } else {
-            cuda_eval_var(m_index);
+            eval();
             Value *result = cuda_hprod(n, (const Value *) cuda_var_ptr(m_index));
             return CUDAArray::from_index_(cuda_var_register(Type, 1, result, true));
         }
@@ -687,7 +741,7 @@ struct CUDAArray : ArrayBase<value_t<Value>, CUDAArray<Value>> {
         if (n == 1) {
             return *this;
         } else {
-            cuda_eval_var(m_index);
+            eval();
             Value *result = cuda_hmax(n, (const Value *) cuda_var_ptr(m_index));
             return CUDAArray::from_index_(cuda_var_register(Type, 1, result, true));
         }
@@ -698,7 +752,7 @@ struct CUDAArray : ArrayBase<value_t<Value>, CUDAArray<Value>> {
         if (n == 1) {
             return *this;
         } else {
-            cuda_eval_var(m_index);
+            eval();
             Value *result = cuda_hmin(n, (const Value *) cuda_var_ptr(m_index));
             return CUDAArray::from_index_(cuda_var_register(Type, 1, result, true));
         }
@@ -709,7 +763,7 @@ struct CUDAArray : ArrayBase<value_t<Value>, CUDAArray<Value>> {
         if (n == 1) {
             return coeff(0);
         } else {
-            cuda_eval_var(m_index);
+            eval();
             return cuda_all(n, (const Value *) cuda_var_ptr(m_index));
         }
     }
@@ -719,13 +773,23 @@ struct CUDAArray : ArrayBase<value_t<Value>, CUDAArray<Value>> {
         if (n == 1) {
             return coeff(0);
         } else {
-            cuda_eval_var(m_index);
+            eval();
             return cuda_any(n, (const Value *) cuda_var_ptr(m_index));
         }
     }
 
-    size_t count_() const {
+    CUDAArray &eval() {
         cuda_eval_var(m_index);
+        return *this;
+    }
+
+    const CUDAArray &eval() const {
+        cuda_eval_var(m_index);
+        return *this;
+    }
+
+    size_t count_() const {
+        eval();
         return cuda_count(cuda_var_size(m_index), (const Value *) cuda_var_ptr(m_index));
     }
 
@@ -733,36 +797,49 @@ struct CUDAArray : ArrayBase<value_t<Value>, CUDAArray<Value>> {
         return CUDAArray::from_index_(cuda_var_register(Type, size, ptr, dealloc));
     }
 
-    static CUDAArray copy(void *ptr, size_t size) {
+    static CUDAArray copy(const void *ptr, size_t size) {
         return CUDAArray::from_index_(cuda_var_copy_to_device(Type, size, ptr));
     }
 
-    template <typename T = Value, enable_if_t<std::is_pointer_v<T>> = 0>
+    CUDAArray &managed() {
+        cuda_make_managed(m_index);
+        return *this;
+    }
+
+    const CUDAArray &managed() const {
+        cuda_make_managed(m_index);
+        return *this;
+    }
+
+    template <typename T = Value, enable_if_t<std::is_pointer_v<T> || std::is_same_v<T, uintptr_t>> = 0>
     std::vector<std::pair<Value, CUDAArray<uint32_t>>> partition_() const {
-        cuda_eval_var(m_index);
+        if (!m_cached_partition) {
+            eval();
 
-        void **unique = nullptr;
-        uint32_t *counts = nullptr;
-        uint32_t **perm = nullptr;
+            void **unique = nullptr;
+            uint32_t *counts = nullptr;
+            uint32_t **perm = nullptr;
 
-        size_t num_unique = cuda_partition(size(), (const void **) data(),
-                                           &unique, &counts, &perm);
+            cuda_partition(size(), (const void **) data(),
+                           &unique, &counts, &perm);
+            uint32_t num_unique = counts[0];
 
-        std::vector<std::pair<Value, CUDAArray<uint32_t>>> result;
-        result.reserve(num_unique);
+            m_cached_partition = new std::vector<std::pair<Value, CUDAArray<uint32_t>>>(num_unique);
+            m_cached_partition->reserve(num_unique);
 
-        for (size_t i = 0; i < num_unique; ++i) {
-            result.emplace_back(
-                (Value) unique[i],
-                CUDAArray<uint32_t>::from_index_(cuda_var_register(
-                    EnokiType::UInt32, counts[i], perm[i], true)));
+            for (uint32_t i = 0; i < num_unique; ++i) {
+                m_cached_partition->emplace_back(
+                    (Value) unique[i],
+                    CUDAArray<uint32_t>::from_index_(cuda_var_register(
+                        EnokiType::UInt32, counts[i + 1], perm[i], true)));
+            }
+
+            cuda_host_free(unique);
+            cuda_host_free(counts);
+            free(perm);
         }
 
-        free(unique);
-        free(counts);
-        free(perm);
-
-        return result;
+        return *m_cached_partition;
     }
 
     template <size_t Stride, typename Index, typename Mask>
@@ -834,8 +911,8 @@ struct CUDAArray : ArrayBase<value_t<Value>, CUDAArray<Value>> {
             return *this;
         else if (mask.size() != size())
             throw std::runtime_error("CUDAArray::compress_(): size mismatch!");
-        cuda_eval_var(m_index);
-        cuda_eval_var(mask.index_());
+        eval();
+        mask.eval();
 
         Value *ptr;
         size_t new_size;
@@ -873,6 +950,7 @@ struct CUDAArray : ArrayBase<value_t<Value>, CUDAArray<Value>> {
 
 protected:
     Index m_index = 0;
+    mutable std::vector<std::pair<Value, CUDAArray<uint32_t>>> *m_cached_partition = nullptr;
 };
 
 template <typename T, enable_if_t<!is_diff_array_v<T> && is_cuda_array_v<T>> = 0>
@@ -931,30 +1009,18 @@ public:
     bool operator!=(const cuda_host_allocator &) { return false; }
 };
 
-#define ENOKI_PINNED_OPERATOR_NEW()                                            \
-    void *operator new(size_t size) { return cuda_host_malloc(size); }         \
-    void operator delete(void *ptr) { cuda_host_free(ptr); }                   \
-    void *operator new(size_t size, std::align_val_t) {                        \
-        return operator new(size);                                             \
-    }                                                                          \
-    void *operator new[](size_t size) { return operator new(size); }           \
-    void *operator new[](size_t size, std::align_val_t) {                      \
-        return operator new(size);                                             \
-    }                                                                          \
-    void operator delete(void *ptr, std::align_val_t) {                        \
-        operator delete(ptr);                                                  \
-    }                                                                          \
-    void operator delete[](void *ptr) { operator delete(ptr); }                \
-    void operator delete[](void *ptr, std::align_val_t) {                      \
-        operator delete(ptr);                                                  \
-    }
+#if defined(_MSC_VER)
+#  define ENOKI_CUDA_EXTERN
+#else
+#  define ENOKI_CUDA_EXTERN extern
+#endif
 
-#if defined(ENOKI_AUTODIFF) && !defined(ENOKI_BUILD)
-    extern ENOKI_IMPORT template struct Tape<CUDAArray<float>>;
-    extern ENOKI_IMPORT template struct DiffArray<CUDAArray<float>>;
+#if defined(ENOKI_AUTODIFF_H) && !defined(ENOKI_BUILD)
+    ENOKI_CUDA_EXTERN template struct ENOKI_IMPORT Tape<CUDAArray<float>>;
+    ENOKI_CUDA_EXTERN template struct ENOKI_IMPORT DiffArray<CUDAArray<float>>;
 
-    extern ENOKI_IMPORT template struct Tape<CUDAArray<double>>;
-    extern ENOKI_IMPORT template struct DiffArray<CUDAArray<double>>;
+    ENOKI_CUDA_EXTERN template struct ENOKI_IMPORT Tape<CUDAArray<double>>;
+    ENOKI_CUDA_EXTERN template struct ENOKI_IMPORT DiffArray<CUDAArray<double>>;
 #endif
 
 NAMESPACE_END(enoki)

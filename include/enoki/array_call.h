@@ -18,15 +18,14 @@ template <typename Class, typename Storage> struct call_support {
     call_support(const Storage &) { }
 };
 
-template <typename Value_, size_t Size_, bool Approx_, bool IsMask_, typename Derived_>
-struct StaticArrayImpl<Value_, Size_, Approx_, RoundingMode::Default, IsMask_, Derived_,
+template <typename Value_, size_t Size_, bool IsMask_, typename Derived_>
+struct StaticArrayImpl<Value_, Size_, IsMask_, Derived_,
                        enable_if_t<detail::array_config<Value_, Size_>::use_pointer_impl>>
-    : StaticArrayImpl<uintptr_t, Size_, Approx_, RoundingMode::Default, IsMask_, Derived_> {
+    : StaticArrayImpl<uintptr_t, Size_, IsMask_, Derived_> {
 
     using UnderlyingType = std::uintptr_t;
 
-    using Base = StaticArrayImpl<UnderlyingType, Size_, Approx_,
-                                 RoundingMode::Default, IsMask_, Derived_>;
+    using Base = StaticArrayImpl<UnderlyingType, Size_, IsMask_, Derived_>;
 
     ENOKI_ARRAY_DEFAULTS(StaticArrayImpl)
     using Base::derived;
@@ -146,7 +145,7 @@ template <typename Storage_> struct call_support_base {
                     masked(result, active) = func(value, active, std::get<Indices>(tuple)...);
                 }
             } else {
-                auto partitioned = partition(self & mask);
+                auto partitioned = partition(self);
 
                 if (partitioned.size() == 1 && partitioned[0].first != nullptr) {
                     result = func(partitioned[0].first, true,
@@ -156,8 +155,9 @@ template <typename Storage_> struct call_support_base {
                         if (value == nullptr)
                             continue;
 
-                        Result temp = func(value, true, gather_helper(
-                             std::get<Indices>(tuple), permutation)...);
+                        Result temp = func(value, gather_helper(mask, permutation),
+                                           gather_helper(std::get<Indices>(tuple),
+                                                         permutation)...);
 
                         scatter<0, true, true>(result, temp, permutation);
                     }
@@ -174,7 +174,7 @@ template <typename Storage_> struct call_support_base {
                     func(value, active, std::get<Indices>(tuple)...);
                 }
             } else {
-                auto partitioned = partition(self & mask);
+                auto partitioned = partition(self);
 
                 if (partitioned.size() == 1 && partitioned[0].first != nullptr) {
                     func(partitioned[0].first, true, std::get<Indices>(tuple)...);
@@ -183,8 +183,9 @@ template <typename Storage_> struct call_support_base {
                         if (value == nullptr)
                             continue;
 
-                        func(value, true, gather_helper(
-                             std::get<Indices>(tuple), permutation)...);
+                        func(value, gather_helper(mask, permutation),
+                             gather_helper(std::get<Indices>(tuple),
+                                           permutation)...);
                     }
                 }
             }

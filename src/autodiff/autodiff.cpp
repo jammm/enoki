@@ -12,13 +12,16 @@
 */
 
 #include <enoki/dynamic.h>
+#if defined(ENOKI_CUDA)
 #include <enoki/cuda.h>
+#endif
 #include <enoki/autodiff.h>
 
 #include <unordered_map>
 #include <set>
 #include <sstream>
 #include <iomanip>
+#include <algorithm>
 
 #if defined(NDEBUG)
 #  define ENOKI_AUTODIFF_DEFAULT_LOG_LEVEL 0
@@ -201,20 +204,23 @@ template <typename Value> struct Tape<Value>::SimplificationLock {
     bool state = false;
 };
 
-template <typename Value> Tape<Value> Tape<Value>::s_tape;
-template <typename Value> Tape<Value> *Tape<Value>::get() { return &s_tape; }
+template <typename Value> std::unique_ptr<Tape<Value>> Tape<Value>::s_tape;
+template <typename Value> ENOKI_PURE Tape<Value> *Tape<Value>::get() {
+    if (ENOKI_UNLIKELY(!s_tape))
+        s_tape = std::unique_ptr<Tape>(new Tape());
+    return s_tape.get();
+}
 
 template <typename Value> Tape<Value>::Tape() {
     d = new Detail();
 
+#if defined(ENOKI_CUDA)
     if constexpr (is_cuda_array_v<Value>)
         cuda_register_callback((void (*)(void *)) & Tape::cuda_callback, this);
+#endif
 }
 
 template <typename Value> Tape<Value>::~Tape() {
-    if constexpr (is_cuda_array_v<Value>)
-        cuda_register_callback((void (*)(void *)) & Tape::cuda_callback, this);
-
 #if !defined(NDEBUG)
     if (d->log_level >= 1) {
         if (d->node_counter != 1)
@@ -411,6 +417,106 @@ Index Tape<Value>::append_gather(const Int64 &offset, const Mask &mask) {
         return target;
     } else {
         return 0;
+    }
+}
+
+template <typename Value>
+Index Tape<Value>::append_reverse(Index source) {
+    if (source == 0)
+        return 0;
+
+    if constexpr (is_dynamic_v<Value>) {
+        struct Reverse : Special {
+            void forward(Detail *detail, Index target_idx, const Edge &edge) const override {
+                const Value &grad_source = detail->node(edge.source).grad;
+                Value &grad_target = detail->node(target_idx).grad;
+
+                Value result = reverse(grad_source);
+
+                if (grad_target.empty())
+                    grad_target = result;
+                else
+                    grad_target += result;
+            }
+
+            void backward(Detail *detail, Index target_idx, const Edge &edge) const override {
+                const Value &grad_target = detail->node(target_idx).grad;
+                Value &grad_source = detail->node(edge.source).grad;
+
+                Value result = reverse(grad_target);
+
+                if (grad_source.empty())
+                    grad_source = result;
+                else
+                    grad_source += result;
+            }
+        };
+
+        Reverse *s = new Reverse();
+
+        Index target = append_node(d->node(source).size, "reverse");
+        d->node(target).edges.emplace_back(source, s);
+        inc_ref_int(source, target);
+
+#if !defined(NDEBUG)
+        if (d->log_level >= 3)
+            std::cerr << "autodiff: append_reverse(" << target << " <- "
+                      << source << ")" << std::endl;
+#endif
+
+        return target;
+    } else {
+        throw std::runtime_error("append_reverse(): internal error!");
+    }
+}
+
+template <typename Value>
+Index Tape<Value>::append_psum(Index source) {
+    if (source == 0)
+        return 0;
+
+    if constexpr (is_dynamic_v<Value>) {
+        struct PrefixSum : Special {
+            void forward(Detail *detail, Index target_idx, const Edge &edge) const override {
+                const Value &grad_source = detail->node(edge.source).grad;
+                Value &grad_target = detail->node(target_idx).grad;
+
+                Value result = psum(grad_source);
+
+                if (grad_target.empty())
+                    grad_target = result;
+                else
+                    grad_target += result;
+            }
+
+            void backward(Detail *detail, Index target_idx, const Edge &edge) const override {
+                const Value &grad_target = detail->node(target_idx).grad;
+                Value &grad_source = detail->node(edge.source).grad;
+
+                Value result = reverse(psum(reverse(grad_target)));
+
+                if (grad_source.empty())
+                    grad_source = result;
+                else
+                    grad_source += result;
+            }
+        };
+
+        PrefixSum *s = new PrefixSum();
+
+        Index target = append_node(d->node(source).size, "psum");
+        d->node(target).edges.emplace_back(source, s);
+        inc_ref_int(source, target);
+
+#if !defined(NDEBUG)
+        if (d->log_level >= 3)
+            std::cerr << "autodiff: append_psum(" << target << " <- "
+                      << source << ")" << std::endl;
+#endif
+
+        return target;
+    } else {
+        throw std::runtime_error("append_psum(): internal error!");
     }
 }
 
@@ -1089,10 +1195,12 @@ template <typename Value> Value safe_mul(const Value &value1, const Value &value
         mask_t<Value> is_zero = eq(value1, zero) || eq(value2, zero);
         return select(is_zero, zero, tentative);
     } else {
+#if defined(ENOKI_CUDA)
         using Mask = mask_t<Value>;
         Mask m1 = Mask::from_index_(cuda_trace_append(EnokiType::Bool, "setp.eq.f32 $r1, $r2, 0.0", value1.index_())),
              m2 = Mask::from_index_(cuda_trace_append(EnokiType::Bool, "setp.eq.or.f32 $r1, $r2, 0.0, $r3", value2.index_(), m1.index_()));
         return Value::from_index_(cuda_trace_append(Value::Type, "selp.$t1 $r1, 0.0, $r2, $r3", tentative.index_(), m2.index_()));
+#endif
     }
 }
 
@@ -1103,10 +1211,12 @@ template <typename Value> Value safe_fmadd(const Value &value1, const Value &val
         mask_t<Value> is_zero = eq(value1, zero) || eq(value2, zero);
         return select(is_zero, value3, tentative);
     } else {
+#if defined(ENOKI_CUDA)
         using Mask = mask_t<Value>;
         Mask m1 = Mask::from_index_(cuda_trace_append(EnokiType::Bool, "setp.eq.f32 $r1, $r2, 0.0", value1.index_())),
              m2 = Mask::from_index_(cuda_trace_append(EnokiType::Bool, "setp.eq.or.f32 $r1, $r2, 0.0, $r3", value2.index_(), m1.index_()));
         return Value::from_index_(cuda_trace_append(Value::Type, "selp.$t1 $r1, $r2, $r3, $r4", value3.index_(), tentative.index_(), m2.index_()));
+#endif
     }
 }
 
@@ -1122,12 +1232,12 @@ template struct ENOKI_EXPORT DiffArray<DynamicArray<Packet<float>>>;
 template struct ENOKI_EXPORT Tape<DynamicArray<Packet<double>>>;
 template struct ENOKI_EXPORT DiffArray<DynamicArray<Packet<double>>>;
 
-#if ENOKI_BUILD_CUDA
-template struct ENOKI_EXPORT Tape<CUDAArray<float>>;
-template struct ENOKI_EXPORT DiffArray<CUDAArray<float>>;
+#if defined(ENOKI_CUDA)
+    template struct ENOKI_EXPORT Tape<CUDAArray<float>>;
+    template struct ENOKI_EXPORT DiffArray<CUDAArray<float>>;
 
-template struct ENOKI_EXPORT Tape<CUDAArray<double>>;
-template struct ENOKI_EXPORT DiffArray<CUDAArray<double>>;
+    template struct ENOKI_EXPORT Tape<CUDAArray<double>>;
+    template struct ENOKI_EXPORT DiffArray<CUDAArray<double>>;
 #endif
 
 NAMESPACE_END(enoki)

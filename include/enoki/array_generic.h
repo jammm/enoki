@@ -14,6 +14,10 @@
 #include <enoki/array_static.h>
 #include <functional>
 
+NAMESPACE_BEGIN(nanogui)
+template <typename Value, size_t Size> struct Array;
+NAMESPACE_END(nanogui)
+
 NAMESPACE_BEGIN(enoki)
 
 namespace detail {
@@ -33,36 +37,27 @@ namespace detail {
           (array_depth_v<Source> < array_depth_v<Target> &&
            detail::array_broadcast_outer_v<Source>));
 
-    template <typename Value, size_t Size,
-              RoundingMode Mode = RoundingMode::Default, typename = int>
+    template <typename Value, size_t Size, typename = int>
     struct is_native {
         static constexpr bool value = false;
     };
 
-    template <typename Value, size_t Size, RoundingMode Mode = RoundingMode::Default>
-    constexpr bool is_native_v = is_native<Value, Size, Mode>::value;
+    template <typename Value, size_t Size>
+    constexpr bool is_native_v = is_native<Value, Size>::value;
 
     /**
      * \brief The class StaticArrayImpl has several different implementations.
      * This class specifies which one to use.
      */
-    template <typename Value, size_t Size, RoundingMode Mode = RoundingMode::Default>
+    template <typename Value, size_t Size>
     struct array_config {
         /// Use SSE/AVX/NEON implementation
         static constexpr bool use_native_impl =
-            is_native_v<Value, Size, Mode>;
-
-        /// Workaround for architectures that can't change the rounding mode
-        static constexpr bool use_rounding_fallback_impl =
-            !use_native_impl &&
-            Mode != RoundingMode::Default &&
-            !((has_avx512f && is_float_v <Value> && Size / 16 * 16 == Size) ||
-              (has_avx512f && is_double_v<Value> && Size /  8 *  8 == Size));
+            is_native_v<Value, Size>;
 
         /// Reduce to several recursive operations
         static constexpr bool use_recursive_impl =
             !use_native_impl &&
-            !use_rounding_fallback_impl &&
             is_std_type_v<Value> &&
             has_vectorization &&
             Size > 3;
@@ -71,7 +66,7 @@ namespace detail {
         static constexpr bool use_enum_impl =
             std::is_enum_v<Value>;
 
-        /// Special case for arrays of pointers
+        /// Special case for arrays of pointers of classes
         static constexpr bool use_pointer_impl =
              std::is_pointer_v<Value> &&
             !std::is_arithmetic_v<std::remove_pointer_t<Value>>;
@@ -79,7 +74,6 @@ namespace detail {
         /// Catch-all for anything that wasn't matched so far
         static constexpr bool use_generic_impl =
             !use_native_impl &&
-            !use_rounding_fallback_impl &&
             !use_recursive_impl &&
             !use_enum_impl &&
             !use_pointer_impl;
@@ -111,20 +105,18 @@ namespace detail {
 
 /// SFINAE macro for constructors that convert from another type
 #define ENOKI_CONVERT(Value)                                                   \
-    template <typename Value2, bool Approx2, RoundingMode Mode2,               \
-              typename Derived2,                                               \
+    template <typename Value2, typename Derived2,                               \
               enable_if_t<detail::is_same_v<Value2, Value>> = 0>               \
     ENOKI_INLINE StaticArrayImpl(                                              \
-        const StaticArrayBase<Value2, Size, Approx2, Mode2, IsMask_, Derived2> &a)
+        const StaticArrayBase<Value2, Size, IsMask_, Derived2> &a)
 
 /// SFINAE macro for constructors that reinterpret another type
 #define ENOKI_REINTERPRET(Value)                                               \
-    template <typename Value2, bool Approx2, RoundingMode Mode2,               \
-              typename Derived2, bool IsMask2,                                 \
+    template <typename Value2, typename Derived2, bool IsMask2,                \
               enable_if_t<detail::is_same_v<Value2, Value>> = 0>               \
     ENOKI_INLINE StaticArrayImpl(                                              \
-        const StaticArrayBase<Value2, Size, Approx2, Mode2, IsMask2, Derived2> \
-            &a, detail::reinterpret_flag)
+        const StaticArrayBase<Value2, Size, IsMask2, Derived2> &a,             \
+        detail::reinterpret_flag)
 
 #define ENOKI_ARRAY_DEFAULTS(Array)                                            \
     Array(const Array &) = default;                                            \
@@ -139,7 +131,6 @@ namespace detail {
     using typename Base::Value;                                                \
     using typename Base::Scalar;                                               \
     using Base::Size;                                                          \
-    using Base::Mode;                                                          \
     using Base::derived;                                                       \
 
 /// Import the essentials when declaring an array subclass (+constructor/assignment op)
@@ -150,9 +141,9 @@ namespace detail {
 
 
 /// Internal macro for native StaticArrayImpl overloads (SSE, AVX, ..)
-#define ENOKI_NATIVE_ARRAY(Value_, Size_, Approx_, Register_, Mode_)           \
+#define ENOKI_NATIVE_ARRAY(Value_, Size_, Register_)                           \
     using Base =                                                               \
-        StaticArrayBase<Value_, Size_, Approx_, Mode_, IsMask_, Derived_>;     \
+        StaticArrayBase<Value_, Size_, IsMask_, Derived_>;                     \
     ENOKI_ARRAY_IMPORT_BASIC(Base, StaticArrayImpl)                            \
     using typename Base::Array1;                                               \
     using typename Base::Array2;                                               \
@@ -168,11 +159,10 @@ namespace detail {
     ENOKI_INLINE StaticArrayImpl(bool b, detail::reinterpret_flag)             \
         : StaticArrayImpl(b ? memcpy_cast<Value_>(int_array_t<Value>(-1))      \
                             : memcpy_cast<Value_>(int_array_t<Value>(0))) { }  \
-    template <typename Value2, size_t Size2, bool Approx2, RoundingMode Mode2, \
-              typename Derived2, enable_if_t<is_scalar_v<Value2>> = 0>         \
+    template <typename Value2, size_t Size2, typename Derived2,                \
+              enable_if_t<is_scalar_v<Value2>> = 0>                            \
     ENOKI_INLINE StaticArrayImpl(                                              \
-        const StaticArrayBase<Value2, Size2, Approx2,                          \
-                              Mode2, IsMask_, Derived2> &a)                    \
+        const StaticArrayBase<Value2, Size2, IsMask_, Derived2> &a)            \
         : Base(a) { }                                                          \
     ENOKI_INLINE StaticArrayImpl &operator=(const Derived &v) {                \
         m = v.m;                                                               \
@@ -234,30 +224,22 @@ namespace detail {
         : Base(r, detail::reinterpret_flag()) { }                              \
     ENOKI_INLINE Array(bool b, detail::reinterpret_flag)                       \
         : Base(b, detail::reinterpret_flag()) { }                              \
-    template <typename Value2, bool Approx2, RoundingMode Mode2,               \
-              typename Derived2>                                               \
-    ENOKI_INLINE Array(const StaticArrayBase<Value2, 4, Approx2, Mode2,        \
-                                             IsMask_, Derived2> &a)            \
+    template <typename Value2, typename Derived2>                              \
+    ENOKI_INLINE Array(const StaticArrayBase<Value2, 4, IsMask_, Derived2> &a) \
         : Base(a) { }                                                          \
-    template <typename Value2, bool Approx2, RoundingMode Mode2, bool IsMask2, \
-              typename Derived2>                                               \
-    ENOKI_INLINE Array(const StaticArrayBase<Value2, 4, Approx2, Mode2,        \
-                                             IsMask2, Derived2> &a,            \
+    template <typename Value2, bool IsMask2, typename Derived2>                \
+    ENOKI_INLINE Array(const StaticArrayBase<Value2, 4, IsMask2, Derived2> &a, \
                        detail::reinterpret_flag)                               \
         : Base(a, detail::reinterpret_flag()) { }                              \
-    template <typename Value2, bool Approx2, RoundingMode Mode2,               \
-              typename Derived2>                                               \
-    ENOKI_INLINE Array(const StaticArrayBase<Value2, 3, Approx2, Mode2,        \
-                                             IsMask_, Derived2> &a) {          \
+    template <typename Value2, typename Derived2>                              \
+    ENOKI_INLINE Array(const StaticArrayBase<Value2, 3, IsMask_, Derived2>&a) {\
         ENOKI_TRACK_SCALAR("Constructor (conversion, 3D case)");               \
         Base::operator=(Derived(Value(a.derived().coeff(0)),                   \
                                 Value(a.derived().coeff(1)),                   \
                                 Value(a.derived().coeff(2))));                 \
     }                                                                          \
-    template <typename Value2, bool Approx2, RoundingMode Mode2, bool IsMask2, \
-              typename Derived2>                                               \
-    ENOKI_INLINE Array(const StaticArrayBase<Value2, 3, Approx2, Mode2,        \
-                                             IsMask2, Derived2> &a,            \
+    template <typename Value2, typename Derived2, bool IsMask2>                \
+    ENOKI_INLINE Array(const StaticArrayBase<Value2, 3, IsMask2, Derived2> &a, \
                        detail::reinterpret_flag) {                             \
         ENOKI_TRACK_SCALAR("Constructor (reinterpreting, 3D case)");           \
         Base::operator=(                                                       \
@@ -270,19 +252,19 @@ namespace detail {
     }
 
 
-template <typename Value_, size_t Size_, bool Approx_, RoundingMode Mode_,
-          bool IsMask_, typename Derived_, typename = int>
+template <typename Value_, size_t Size_, bool IsMask_, typename Derived_, typename = int>
 struct StaticArrayImpl;
 
-template <typename Value_, size_t Size_, bool Approx_, bool IsMask_, typename Derived_>
-struct StaticArrayImpl<Value_, Size_, Approx_, RoundingMode::Default, IsMask_, Derived_,
-                       enable_if_t<detail::array_config<Value_, Size_>::use_generic_impl>>
+template <typename Value_, size_t Size_, bool IsMask_, typename Derived_>
+struct StaticArrayImpl<
+    Value_, Size_, IsMask_, Derived_,
+    enable_if_t<detail::array_config<Value_, Size_>::use_generic_impl>>
     : StaticArrayBase<std::conditional_t<IsMask_, mask_t<Value_>, Value_>,
-                      Size_, Approx_, RoundingMode::Default, IsMask_, Derived_> {
+                      Size_, IsMask_, Derived_> {
 
-    using Base = StaticArrayBase<
-        std::conditional_t<IsMask_, mask_t<Value_>, Value_>,
-        Size_, Approx_, RoundingMode::Default, IsMask_, Derived_>;
+    using Base =
+        StaticArrayBase<std::conditional_t<IsMask_, mask_t<Value_>, Value_>,
+                        Size_, IsMask_, Derived_>;
 
     using typename Base::Derived;
     using typename Base::Value;
@@ -291,12 +273,12 @@ struct StaticArrayImpl<Value_, Size_, Approx_, RoundingMode::Default, IsMask_, D
     using typename Base::Array2;
 
     using Base::Size;
-    using Base::Mode;
     using Base::derived;
 
     using StorageType =
-        std::conditional_t<std::is_reference_v<Value>,
-                           std::reference_wrapper<std::remove_reference_t<Value>>, Value>;
+        std::conditional_t<std::is_reference_v<Value> && Size_ != 0,
+                           std::reference_wrapper<std::remove_reference_t<Value>>,
+                           std::remove_reference_t<Value>>;
 
     using Ref = std::remove_reference_t<Value> &;
     using ConstRef = const std::remove_reference_t<Value> &;
@@ -316,6 +298,7 @@ struct StaticArrayImpl<Value_, Size_, Approx_, RoundingMode::Default, IsMask_, D
 // Don't be so noisy about sign conversion in constructor
 #  pragma GCC diagnostic push
 #  pragma GCC diagnostic ignored "-Wsign-conversion"
+#  pragma GCC diagnostic ignored "-Wdouble-promotion"
 #  pragma GCC diagnostic ignored "-Wunused-value"
 #endif
 
@@ -338,6 +321,12 @@ struct StaticArrayImpl<Value_, Size_, Approx_, RoundingMode::Default, IsMask_, D
     template <typename T, typename ST = StorageType,
               enable_if_t<!std::is_default_constructible_v<ST>> = 0>
     ENOKI_INLINE StaticArrayImpl(T &&value)
+        : StaticArrayImpl(std::forward<T>(value),
+                          std::make_index_sequence<Derived::Size>()) { }
+
+    template <typename T, typename ST = StorageType,
+              enable_if_t<!std::is_default_constructible_v<ST>> = 0>
+    ENOKI_INLINE StaticArrayImpl(T &&value, detail::reinterpret_flag)
         : StaticArrayImpl(std::forward<T>(value),
                           std::make_index_sequence<Derived::Size>()) { }
 
@@ -459,17 +448,20 @@ private:
                                std::is_same_v<value_t<T>, value_t<Derived>>;
         ENOKI_MARK_USED(Move);
 
-        if constexpr (detail::broadcast<T, Derived>) {
+        if constexpr (std::is_same_v<std::decay_t<T>, nanogui::Array<Value, Size>>) {
+            for (size_t i = 0; i < Size; ++i)
+                coeff(i) = value[i];
+        } else if constexpr (detail::broadcast<T, Derived>) {
             auto s = static_cast<cast_t<T>>(value);
-            bool unused[] = { (coeff(Is) = s, false)... };
-            (void) unused;
+            bool unused[] = { (coeff(Is) = s, false)..., false };
+            (void) unused; (void) s;
         } else {
             if constexpr (Move) {
-                bool unused[] = { (coeff(Is) = std::move(value.derived().coeff(Is)), false)... };
+                bool unused[] = { (coeff(Is) = std::move(value.derived().coeff(Is)), false)..., false };
                 (void) unused;
             } else {
                 using Src = decltype(value.derived().coeff(0));
-                bool unused[] = { (coeff(Is) = cast_t<Src>(value.derived().coeff(Is)), false)... };
+                bool unused[] = { (coeff(Is) = cast_t<Src>(value.derived().coeff(Is)), false)..., false };
                 (void) unused;
             }
         }
@@ -516,10 +508,10 @@ private:
         }
 
         if constexpr(detail::broadcast<T, Derived>) {
-            bool unused[] = { (coeff(Is) = reinterpret_array<Value>(value), false)... };
+            bool unused[] = { (coeff(Is) = reinterpret_array<Value>(value), false)..., false };
             (void) unused;
         } else {
-            bool unused[] = { (coeff(Is) = reinterpret_array<Value>(value.coeff(Is)), false)... };
+            bool unused[] = { (coeff(Is) = reinterpret_array<Value>(value.coeff(Is)), false)..., false };
             (void) unused;
         }
     }

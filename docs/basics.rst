@@ -76,7 +76,7 @@ as follows:
     :width: 500px
     :align: center
 
-Altogether, Enoki currently currently supports the ARM NEON, SSE4.2, AVX, AVX2,
+Altogether, Enoki currently supports the ARM NEON, SSE4.2, AVX, AVX2,
 and AVX512 instruction sets and vectorizes arithmetic involving single and
 double precision floating point values as well as signed and unsigned 32-bit
 and 64-bit integers.
@@ -95,35 +95,9 @@ instruction that leaves the last entry unused.
 
 A perhaps more sensible use of this feature is to instantiate packed arrays
 with a ``Size`` that is an integer multiple of what is supported natively as a
-way of aggressively unrolling the underlying computations.
-
-In addition to ``Type`` and ``Size``, :cpp:class:`enoki::Array` supports two
-additional template parameters.  We will explicitly specify them all below to
-define a new type named ``MyFloat``:
-
-.. code-block:: cpp
-
-    using MyFloat = Array<
-        float,                 // Type:   Underlying scalar data type
-        4,                     // Size:   Number of packed float elements
-        true,                  // Approx: Use approximate math library?
-        RoundingMode::Default  // Mode:   Rounding mode (Default/Up/Down/Zero/Nearest)
-    >;
-
-Most of the parameters can be omitted: if ``Size`` is not specified, the
-implementation chooses the largest value that is natively supported by the
-target hardware. The ``Approx`` parameter specifies whether Enoki's vectorized
-math library should be used for transcendental function evaluations such as
-``exp()``, ``cos()``, as opposed to serializing those evaluations through the
-standard C math library.
-
-The vectorized math library is slightly more approximate, though this is
-generally negligible (the average relative error is generally
-:math:`<\!\frac{1}{2}` ULP on their full domain---see the :ref:`reference
-<transcendental-accuracy>` for details. The default rounding mode
-:any:`RoundingMode::Default` means that the library won't interfere with the
-hardware's currently selected rounding mode. Note that the last two parameters
-only make sense when dealing with floating point types.
+way of aggressively unrolling the underlying computations. If ``Size`` is not
+specified, the implementation chooses a reasonable value (4 on machines with
+SSE/NEON, 8 on machines with AVX, and 16 on AVX512).
 
 Initializing, reading, and writing data
 ---------------------------------------
@@ -371,6 +345,9 @@ utilize the hardware vector units (ways of avoiding them are discussed later).
 
     /* Horizontal maximum, equivalent to std::max({ f1[0], f1[1], f1[2], f1[3] }) */
     float s3 = hmax(f1);
+
+    /* Horizontal mean , equivalent to (f1[0] + f1[1] + f1[2] + f1[3]) / 4.f */
+    float s4 = hmean(f1);
 
 The following linear algebra primitives are also realized in terms of horizontal operations:
 

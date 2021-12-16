@@ -15,7 +15,7 @@ Makefile
 *.ninja
 
 # Miscellaneous;
-/build
+/build*
 /Testing
 /tests/Testing
 *.dir
@@ -55,6 +55,9 @@ libenoki-autodiff.so
 libenoki-autodiff.dylib
 enoki-autodiff.dll
 enoki.cpython*
+/enoki
+compile_commands.json
+\.clangd
 
 # Documentation
 /html
